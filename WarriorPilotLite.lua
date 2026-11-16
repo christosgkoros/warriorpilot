@@ -592,6 +592,11 @@ local function EnemiesOnYou()
     return count
 end
 
+-- In a group extra mobs and elites are expected, so the solo-only checks are skipped.
+local function IsSolo()
+    return not (IsInGroup and Yes(IsInGroup()))
+end
+
 -- Risk visible at the pull: enemy count, target level and elite status.
 -- Returns 0 ok / 1 risky / 2 flee, the reasons, and whether the target is skull-level.
 local function AssessPull(enemies)
@@ -600,8 +605,7 @@ local function AssessPull(enemies)
         level = math.max(level, danger)
         reasons[#reasons+1] = reason
     end
-    -- In a group extra mobs and elites are expected, so only the solo checks are skipped.
-    local solo = not (IsInGroup and Yes(IsInGroup()))
+    local solo = IsSolo()
     if solo and enemies >= FIGHT.fleeEnemies then
         add(2, enemies .. " enemies on you")
     elseif solo and enemies >= 2 then
@@ -667,8 +671,7 @@ local function HealthRace(enemies)
     return 0, string.format("Winning: you %s, enemies %s", Seconds(myTime), Seconds(theirTime))
 end
 
-local function FleeAlert(text)
-    local color = FIGHT_COLORS[2]
+local function FightAlert(text, color)
     if RaidNotice_AddMessage and RaidWarningFrame then
         RaidNotice_AddMessage(RaidWarningFrame, text, { r = color[1], g = color[2], b = color[3] })
     elseif UIErrorsFrame then
@@ -688,10 +691,19 @@ local function EndFight()
 end
 
 -- Runs every second in combat: a verdict on the readiness line, a red HUD border
--- while it says flee, and one center-screen warning + sound per fight.
+-- while it says flee, one center-screen flee warning + sound per fight, and a
+-- center-screen warning whenever adds join you while solo.
 local function RefreshFight()
-    fight = fight or { samples = {}, alerted = false }
+    fight = fight or { samples = {}, alerted = false, enemies = 1 }
     local enemies = EnemiesOnYou()
+    -- Highest count seen, so a nameplate flickering in and out doesn't re-alert.
+    local adds = 0
+    if enemies > fight.enemies then
+        adds = IsSolo() and enemies - fight.enemies or 0
+        fight.enemies = enemies
+        -- The health trend from before the adds no longer predicts anything.
+        fight.samples = {}
+    end
     local pullLevel, reasons, skull = AssessPull(enemies)
     local raceLevel, raceText = HealthRace(math.max(1, enemies))
 
@@ -723,7 +735,10 @@ local function RefreshFight()
     SetBorder(level == 2 and FIGHT_COLORS[2] or BORDER_COLOR)
     if level == 2 and not fight.alerted then
         fight.alerted = true
-        FleeAlert(text)
+        FightAlert(text, FIGHT_COLORS[2])
+    elseif adds > 0 then
+        FightAlert(string.format("+%d add%s! %d enemies on you", adds, adds > 1 and "s" or "", enemies),
+            FIGHT_COLORS[math.max(level, 1)])
     end
 end
 
