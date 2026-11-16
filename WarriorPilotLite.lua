@@ -1,9 +1,9 @@
--- WarriorPilot Lite 1.4.1 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.4.2 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.4.1"
+local VERSION = "1.4.2"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -634,6 +634,8 @@ end
 
 -- Records health and predicts who drops first from the last few seconds:
 -- your health vs your target's, plus a fresh mob for every extra enemy on you.
+-- Damage taken is scaled from the enemy count it was taken at to the count now,
+-- so adds that just joined are judged at once instead of after a new trend builds.
 local function HealthRace(enemies)
     local now = GetTime()
     local me = HealthPct("player")
@@ -642,7 +644,7 @@ local function HealthRace(enemies)
     if Secret(guid) then guid = nil end
     local them = guid and HealthPct("target")
     local samples = fight.samples
-    table.insert(samples, { t = now, me = me, them = them, guid = guid })
+    table.insert(samples, { t = now, me = me, them = them, guid = guid, enemies = enemies })
     while samples[1] and samples[1].t < now - FIGHT.window do table.remove(samples, 1) end
 
     local first = samples[1]
@@ -655,7 +657,9 @@ local function HealthRace(enemies)
     local span = now - firstThem.t
     if span < FIGHT.minWindow then return nil end
 
-    local myLoss = first.me - me
+    local seen = 0
+    for _, sample in ipairs(samples) do seen = seen + sample.enemies end
+    local myLoss = (first.me - me) * enemies / (seen / #samples)
     local myRate = myLoss / (now - first.t)
     local theirRate = (firstThem.them - them) / span
     local myTime = myRate > 0 and me / myRate or math.huge
@@ -701,8 +705,6 @@ local function RefreshFight()
     if enemies > fight.enemies then
         adds = IsSolo() and enemies - fight.enemies or 0
         fight.enemies = enemies
-        -- The health trend from before the adds no longer predicts anything.
-        fight.samples = {}
     end
     local pullLevel, reasons, skull = AssessPull(enemies)
     local raceLevel, raceText = HealthRace(math.max(1, enemies))
@@ -733,12 +735,14 @@ local function RefreshFight()
 
     SetReadiness(text, FIGHT_COLORS[level])
     SetBorder(level == 2 and FIGHT_COLORS[2] or BORDER_COLOR)
-    if level == 2 and not fight.alerted then
+    if adds > 0 then
+        -- Adds always get a warning that carries the verdict, flee or not.
+        if level == 2 then fight.alerted = true end
+        FightAlert(string.format("+%d add%s! %s", adds, adds > 1 and "s" or "", text),
+            FIGHT_COLORS[math.max(level, 1)])
+    elseif level == 2 and not fight.alerted then
         fight.alerted = true
         FightAlert(text, FIGHT_COLORS[2])
-    elseif adds > 0 then
-        FightAlert(string.format("+%d add%s! %d enemies on you", adds, adds > 1 and "s" or "", enemies),
-            FIGHT_COLORS[math.max(level, 1)])
     end
 end
 

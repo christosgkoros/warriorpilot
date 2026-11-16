@@ -470,7 +470,7 @@ test("counts every enemy on you, not just the target", function()
     wow.state.units.nameplate3 = mob({ guid = "add2" })
     wow.state.units.nameplate4 = mob({ guid = "bystander", inCombat = false })
     trade(5, 10, 5) -- three enemies: (50 + 200) / 10 = 25 s to kill them all
-    eq(ready(), "FLEE! You die in ~15s, enemies in ~25s", "three enemies")
+    eq(ready(), "FLEE! You die in ~14s, enemies in ~25s", "three enemies") -- first reading was 1 enemy
 end)
 
 test("warns at the pull about many enemies, before any health data", function()
@@ -487,36 +487,56 @@ test("warns at the pull about many enemies, before any health data", function()
     eq(ready(), "Risky: 2 enemies", "two enemies")
 end)
 
-test("alerts center-screen the moment adds join a solo fight", function()
+-- `count` adds show up on nameplates 2.. (nameplate1 is the first mob).
+local function addsJoin(count)
+    for i = 2, count + 1 do wow.state.units["nameplate" .. i] = mob({ guid = "add" .. i }) end
+end
+
+test("judges flee the moment adds join, from the damage one mob was doing", function()
     pull(mob())
     wow.state.units.nameplate1 = mob({ guid = "mob" })
-    trade(2, 10, 4)
+    trade(3, 10, 4)
     has(ready(), "Winning", "one enemy")
     eq(#wow.alerts, 0, "no alert yet")
 
-    wow.state.units.nameplate2 = mob({ guid = "add1" })
-    wow.state.units.nameplate3 = mob({ guid = "add2" })
-    wow.advance(1)
-    eq(wow.alerts[1], "+2 adds! 3 enemies on you", "adds alert")
+    addsJoin(2)
+    trade(9, 10, 1) -- 3%/s per mob, now three of them
+    eq(wow.alerts[1], "+2 adds! " .. ready(), "adds alert carries the verdict")
+    has(ready(), "FLEE! You die in ~", "verdict")
     eq(#wow.sounds, 1, "alert sound")
-    eq(ready(), "Risky: 3 enemies", "old one-mob trend is dropped")
+    trade(9, 10, 2)
+    eq(#wow.alerts, 1, "no second flee alert")
+end)
 
-    wow.state.units.nameplate3 = nil
+test("says fight on when you can still win against the adds", function()
+    pull(mob())
+    wow.state.units.nameplate1 = mob({ guid = "mob" })
+    trade(1, 15, 4)
+    addsJoin(2)
+    trade(3, 15, 1)
+    has(wow.alerts[1], "+2 adds! Winning: you ~", "adds alert")
+    eq(border()[1], 0.32, "border stays normal")
+end)
+
+test("adds alerts ignore flickering nameplates and groups", function()
+    pull(mob())
+    wow.state.units.nameplate1 = mob({ guid = "mob" })
+    trade(1, 5, 4)
+    addsJoin(1)
     wow.advance(1)
-    wow.state.units.nameplate3 = mob({ guid = "add2" })
+    eq(#wow.alerts, 1, "one add")
+    wow.state.units.nameplate2 = nil
+    wow.advance(1)
+    addsJoin(1)
     wow.advance(1)
     eq(#wow.alerts, 1, "a flickering nameplate doesn't re-alert")
-
-    wow.state.units.nameplate4 = mob({ guid = "add3" })
+    addsJoin(2)
     wow.advance(1)
-    eq(ready(), "FLEE! 4 enemies on you", "fourth enemy")
-    eq(wow.alerts[2], "FLEE! 4 enemies on you", "flee alert replaces the adds alert")
-    eq(#wow.alerts, 2, "one alert per change")
+    eq(#wow.alerts, 2, "a genuinely new add alerts")
 
     pull(mob(), { inGroup = true })
     wow.state.units.nameplate1 = mob({ guid = "mob" })
-    wow.state.units.nameplate2 = mob({ guid = "add1" })
-    wow.state.units.nameplate3 = mob({ guid = "add2" })
+    addsJoin(2)
     wow.advance(1)
     eq(#wow.alerts, 0, "no adds alert in a group")
 end)
