@@ -1,9 +1,9 @@
--- WarriorPilot Lite 1.4.0 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.4.1 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.4.0"
+local VERSION = "1.4.1"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
