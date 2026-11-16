@@ -375,12 +375,12 @@ test("flags broken gear and ignores secret health", function()
     eq(ready(), "Broken gear!", "readiness")
 end)
 
-test("shows In combat during fights and updates as soon as combat ends", function()
+test("shows the fight verdict during fights and updates as soon as combat ends", function()
     login()
     shoutActive(120)
     wow.state.inCombat = true
     wow.fire("PLAYER_REGEN_DISABLED")
-    eq(ready(), "In combat", "in combat")
+    eq(ready(), "Fight looks OK", "in combat")
     wow.state.inCombat = false
     wow.fire("PLAYER_REGEN_ENABLED")
     eq(ready(), "Ready to pull", "after combat")
@@ -399,6 +399,155 @@ test("shows nothing while dead", function()
     login({ dead = true })
     wow.advance(1)
     eq(ready(), "", "readiness")
+end)
+
+---------------------------------------------------------------------------
+-- Fight danger / flee warning
+---------------------------------------------------------------------------
+
+local RED = { 1.0, 0.25, 0.22 }
+local function mob(fields)
+    local u = { level = 10, health = 100, healthMax = 100, guid = "mob", inCombat = true, threat = 3 }
+    for k, v in pairs(fields or {}) do u[k] = v end
+    return u
+end
+local function pull(target, overrides)
+    login(overrides)
+    shoutActive(120)
+    wow.state.units.target = target
+    wow.state.inCombat = true
+    wow.fire("PLAYER_REGEN_DISABLED")
+end
+-- One second of fighting: you lose `myLoss`% health, the target `theirLoss`%.
+local function trade(myLoss, theirLoss, seconds)
+    for _ = 1, seconds or 1 do
+        wow.state.health = wow.state.health - myLoss
+        local t = wow.state.units.target
+        if t.health ~= wow.SECRET then t.health = t.health - theirLoss end
+        wow.advance(1)
+    end
+end
+local function border() return _G.WarriorPilotLiteFrame.border end
+
+test("says flee when you are losing the health race, and alerts once", function()
+    pull(mob())
+    trade(8, 4, 5) -- you: 60% at 8%/s, target: 80% at 4%/s
+    eq(ready(), "FLEE! You die in ~8s, enemies in ~20s", "verdict")
+    eq(border()[1], RED[1], "border turns red")
+    eq(#wow.alerts, 1, "center-screen alert")
+    eq(#wow.sounds, 1, "alert sound")
+    trade(8, 4, 2)
+    eq(#wow.alerts, 1, "alerts only once per fight")
+end)
+
+test("says winning when the target drops faster", function()
+    pull(mob())
+    trade(2, 10, 5)
+    has(ready(), "Winning: you ~", "verdict")
+    eq(#wow.alerts, 0, "no alert")
+end)
+
+test("says winning when you are not losing health", function()
+    pull(mob())
+    trade(0, 10, 4)
+    eq(ready(), "Winning", "verdict")
+end)
+
+test("calls an even trade a close fight", function()
+    pull(mob())
+    trade(5, 5, 5)
+    eq(ready(), "Close fight: you ~15s, enemies ~15s", "verdict")
+end)
+
+test("counts every enemy on you, not just the target", function()
+    pull(mob())
+    trade(5, 10, 5) -- alone this is a clear win: 15 s vs 5 s
+    has(ready(), "Winning", "one enemy")
+
+    pull(mob())
+    wow.state.units.nameplate1 = mob({ guid = "mob" })
+    wow.state.units.nameplate2 = mob({ guid = "add1", threat = nil, targetsPlayer = true })
+    wow.state.units.nameplate3 = mob({ guid = "add2" })
+    wow.state.units.nameplate4 = mob({ guid = "bystander", inCombat = false })
+    trade(5, 10, 5) -- three enemies: (50 + 200) / 10 = 25 s to kill them all
+    eq(ready(), "FLEE! You die in ~15s, enemies in ~25s", "three enemies")
+end)
+
+test("warns at the pull about many enemies, before any health data", function()
+    pull(mob())
+    for i = 1, 4 do wow.state.units["nameplate" .. i] = mob({ guid = "m" .. i }) end
+    wow.advance(1)
+    eq(ready(), "FLEE! 4 enemies on you", "four enemies")
+    eq(#wow.alerts, 1, "alert")
+
+    pull(mob())
+    wow.state.units.nameplate1 = mob({ guid = "a" })
+    wow.state.units.nameplate2 = mob({ guid = "b" })
+    wow.advance(1)
+    eq(ready(), "Risky: 2 enemies", "two enemies")
+end)
+
+test("flags a skull-level target as flee right away", function()
+    pull(mob({ level = -1 }))
+    eq(ready(), "FLEE! Skull-level target", "verdict")
+    trade(1, 10, 5)
+    eq(ready(), "FLEE! Skull-level target", "health trend doesn't override a skull")
+end)
+
+test("flags solo elites and higher-level mobs, but not elites in a group", function()
+    pull(mob({ level = 12, classification = "elite" }))
+    eq(ready(), "FLEE! elite +2", "solo elite +2")
+    pull(mob({ level = 10, classification = "elite" }))
+    eq(ready(), "Risky: elite", "solo elite")
+    pull(mob({ level = 13 }))
+    eq(ready(), "Risky: +3 levels", "normal +3")
+    pull(mob({ level = 12, classification = "elite" }), { inGroup = true })
+    eq(ready(), "Fight looks OK", "elite in a group")
+end)
+
+test("keeps pull risks as context next to a winning trend", function()
+    pull(mob({ level = 10, classification = "elite" }))
+    trade(2, 10, 5)
+    has(ready(), "Winning: you ~", "verdict")
+    has(ready(), "·  elite", "context")
+end)
+
+test("restarts the target's history when you switch targets", function()
+    pull(mob())
+    trade(5, 10, 5)
+    wow.state.units.target = mob({ guid = "other" })
+    wow.advance(1)
+    eq(ready(), "Fight looks OK", "no prediction yet for the new target")
+end)
+
+test("says flee on low health when no prediction is possible", function()
+    pull(nil, { health = 25 })
+    eq(ready(), "FLEE! Health at 25%", "verdict")
+end)
+
+test("stays neutral when health is secret", function()
+    pull(mob({ health = wow.SECRET }), { health = wow.SECRET })
+    wow.advance(5)
+    eq(ready(), "In combat", "verdict")
+    eq(#wow.alerts, 0, "no alert")
+end)
+
+test("ignores a secret target health and still judges the pull", function()
+    pull(mob({ health = wow.SECRET, level = 13 }))
+    trade(8, 0, 5)
+    eq(ready(), "Risky: +3 levels", "verdict")
+end)
+
+test("resets the border and alert after the fight", function()
+    pull(mob({ level = -1 }))
+    eq(#wow.alerts, 1, "first fight alert")
+    wow.state.inCombat = false
+    wow.fire("PLAYER_REGEN_ENABLED")
+    eq(ready(), "Ready to pull", "after combat")
+    eq(border()[1], 0.32, "border back to normal")
+    wow.state.inCombat = true
+    wow.fire("PLAYER_REGEN_DISABLED")
+    eq(#wow.alerts, 2, "next fight alerts again")
 end)
 
 ---------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: |cffffc46bWarriorPilot Lite|r
-## Notes: Lightweight Warrior leveling HUD for WoW Forever: Rage, XP/hour, time to level, quest vs kill XP, between-pulls readiness, mining casts and ore loot.
+## Notes: Lightweight Warrior leveling HUD for WoW Forever: Rage, XP/hour, time to level, quest vs kill XP, between-pulls readiness, in-combat flee warning, mining casts and ore loot.
 ## Author: Custom build for Christos
-## Version: 1.3.0
+## Version: 1.4.0
 ## SavedVariablesPerCharacter: WarriorPilotLiteDB
 ## X-GameType: Forever
 ## Category: Leveling

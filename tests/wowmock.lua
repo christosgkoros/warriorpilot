@@ -27,6 +27,10 @@ local function defaultState()
         auras = {},                -- list of { name =, spellId =, expirationTime = }
         durability = {},           -- [slot] = { current, maximum }
         bags = { [0] = { 16, 0 }, [1] = { 10, 0 } }, -- [bag] = { freeSlots, bagType }
+        inGroup = false,
+        -- Other units by token ("target", "nameplate1", ...): { level, health, healthMax,
+        -- classification, guid, hostile, dead, inCombat, threat, targetsPlayer }
+        units = {},
     }
 end
 
@@ -60,6 +64,7 @@ function Methods:Hide() self.shown = false end
 function Methods:IsShown() return self.shown end
 function Methods:EnableMouse(enabled) self.mouse = enabled and true or false end
 function Methods:SetValue(value) self.value = value end
+function Methods:SetBackdropBorderColor(r, g, b) self.border = { r, g, b } end
 function Methods:SetMinMaxValues(lo, hi) self.min, self.max = lo, hi end
 function Methods:GetCenter() return 0, 0 end
 function Methods:CreateFontString() return newObject("FontString", nil, self) end
@@ -94,14 +99,32 @@ local function installGlobals(db)
     _G.GetTime = function() return s.now end
     _G.GetMaxPlayerLevel = function() return 60 end
     _G.InCombatLockdown = function() return s.inCombat end
-    _G.UnitAffectingCombat = function() return s.inCombat end
+    -- Unit functions answer for the player by default and for s.units otherwise.
+    local function unit(token, playerValue, field)
+        if token == nil or token == "player" then return playerValue end
+        local u = s.units[token]
+        return u and u[field]
+    end
+    _G.UnitExists = function(token) return token == "player" or s.units[token] ~= nil end
+    _G.UnitCanAttack = function(_, token) local u = s.units[token]; return u ~= nil and u.hostile ~= false end
+    _G.UnitIsDead = function(token) return unit(token, s.dead, "dead") or false end
+    _G.UnitGUID = function(token) local u = s.units[token]; return u and (u.guid or token) end
+    _G.UnitClassification = function(token) return unit(token, "normal", "classification") or "normal" end
+    _G.UnitThreatSituation = function(_, token) return unit(token, nil, "threat") end
+    _G.UnitIsUnit = function(a, b)
+        local base = b == "player" and a:match("^(.+)target$")
+        if base then local u = s.units[base]; return u ~= nil and u.targetsPlayer == true end
+        return a == b
+    end
+    _G.IsInGroup = function() return s.inGroup end
+    _G.UnitAffectingCombat = function(token) return unit(token, s.inCombat, "inCombat") or false end
     _G.UnitIsDeadOrGhost = function() return s.dead end
     _G.UnitClass = function() return s.class:sub(1, 1) .. s.class:sub(2):lower(), s.class end
-    _G.UnitLevel = function() return s.level end
+    _G.UnitLevel = function(token) return unit(token, s.level, "level") end
     _G.UnitXP = function() return s.xp end
     _G.UnitXPMax = function() return s.xpMax end
-    _G.UnitHealth = function() return s.health end
-    _G.UnitHealthMax = function() return s.healthMax end
+    _G.UnitHealth = function(token) return unit(token, s.health, "health") end
+    _G.UnitHealthMax = function(token) return unit(token, s.healthMax, "healthMax") or 100 end
     _G.UnitPower = function() return s.rage end
     _G.UnitPowerMax = function() return s.rageMax end
     _G.IsPlayerSpell = function(id) return s.known[id] == true end
@@ -121,6 +144,10 @@ local function installGlobals(db)
             return 0, 0
         end,
     }
+    _G.RaidWarningFrame = {}
+    _G.RaidNotice_AddMessage = function(_, text) table.insert(M.alerts, text) end
+    _G.SOUNDKIT = { RAID_WARNING = 8959 }
+    _G.PlaySound = function(id) table.insert(M.sounds, id) end
     _G.C_Timer = {
         After = function(delay, fn) table.insert(M.timers, { at = s.now + delay, fn = fn }) end,
     }
@@ -131,7 +158,7 @@ end
 function M.load(addonPath, db, overrides, state)
     M.state = state or defaultState()
     for key, value in pairs(overrides or {}) do M.state[key] = value end
-    M.frames, M.fontStrings, M.chat, M.timers = {}, {}, {}, {}
+    M.frames, M.fontStrings, M.chat, M.timers, M.alerts, M.sounds = {}, {}, {}, {}, {}, {}
     installGlobals(db)
     local chunk = assert(loadfile(addonPath))
     chunk("WarriorPilotLite", {})

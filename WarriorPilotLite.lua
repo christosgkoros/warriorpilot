@@ -1,9 +1,9 @@
--- WarriorPilot Lite 1.3.0 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.4.0 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.3.0"
+local VERSION = "1.4.0"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -19,6 +19,26 @@ local READY = {
 }
 local BATTLE_SHOUT_ID = 6673 -- rank 1; buffs are matched by name so every rank counts
 local battleShoutName
+
+-- In-combat danger check. It only reads values the game hasn't made secret;
+-- anything it can't read is skipped, so it never guesses from hidden data.
+local FIGHT = {
+    window = 8,         -- seconds of health history used to predict who drops first
+    minWindow = 3,      -- need at least this much history before predicting
+    minDrop = 5,        -- you must have lost this much health % in the window to be "losing"
+    margin = 1.25,      -- you must be clearly losing before it says flee
+    fleeEnemies = 4,    -- this many enemies on you (solo) is a flee
+    fleeEliteLevels = 2, -- a solo elite this many levels above you is a flee
+    riskyLevels = 3,    -- a normal mob this many levels above you is risky
+    lowHealthPct = 30,  -- with no prediction available, flee below this health
+}
+local FIGHT_COLORS = {
+    [0] = {0.55, 0.85, 0.55},
+    [1] = {1.0, 0.62, 0.25},
+    [2] = {1.0, 0.25, 0.22},
+}
+local BORDER_COLOR = {0.32, 0.35, 0.40}
+local fight -- { samples = {...}, alerted = bool } while in combat
 
 local WPL = {}
 local session
@@ -366,7 +386,7 @@ local function BuildPanel()
         edgeSize = 1,
     })
     panel:SetBackdropColor(0.055, 0.068, 0.085, 0.95)
-    panel:SetBackdropBorderColor(0.32, 0.35, 0.40, 1)
+    panel:SetBackdropBorderColor(BORDER_COLOR[1], BORDER_COLOR[2], BORDER_COLOR[3], 1)
     panel:SetFrameStrata("MEDIUM")
     panel:SetPoint("CENTER", UIParent, "CENTER", saved.x or DEFAULT_X, saved.y or DEFAULT_Y)
     -- When locked, the panel ignores the mouse so clicks pass through to the world.
@@ -537,16 +557,190 @@ local function SetReadiness(text, color)
     labels.ready:SetText(text)
 end
 
--- Out-of-combat checklist. In combat many values may be secret, and nothing here
--- matters mid-fight anyway, so the line just says "In combat".
+-- True only for a readable, truthy value; secret values count as "don't know".
+local function Yes(value)
+    if Secret(value) then return false end
+    return value and true or false
+end
+
+local function HealthPct(unit)
+    local health, healthMax = Number(UnitHealth(unit)), Number(UnitHealthMax(unit))
+    if health and healthMax and healthMax > 0 then return health * 100 / healthMax end
+    return nil
+end
+
+local function IsLiveEnemy(unit)
+    if not Yes(UnitExists(unit)) or not Yes(UnitCanAttack("player", unit)) then return false end
+    local dead = UnitIsDead(unit)
+    return not Secret(dead) and not dead
+end
+
+-- In combat with the player: on its threat table, or targeting the player.
+local function IsOnYou(unit)
+    if not IsLiveEnemy(unit) or not Yes(UnitAffectingCombat(unit)) then return false end
+    if UnitThreatSituation and Yes(UnitThreatSituation("player", unit)) then return true end
+    return Yes(UnitIsUnit(unit .. "target", "player"))
+end
+
+-- Counted from enemy nameplates, so it needs nameplates turned on (V key).
+local function EnemiesOnYou()
+    local count = 0
+    for i = 1, 40 do
+        if IsOnYou("nameplate" .. i) then count = count + 1 end
+    end
+    if count == 0 and IsLiveEnemy("target") and Yes(UnitAffectingCombat("target")) then count = 1 end
+    return count
+end
+
+-- Risk visible at the pull: enemy count, target level and elite status.
+-- Returns 0 ok / 1 risky / 2 flee, the reasons, and whether the target is skull-level.
+local function AssessPull(enemies)
+    local level, reasons = 0, {}
+    local function add(danger, reason)
+        level = math.max(level, danger)
+        reasons[#reasons+1] = reason
+    end
+    -- In a group extra mobs and elites are expected, so only the solo checks are skipped.
+    local solo = not (IsInGroup and Yes(IsInGroup()))
+    if solo and enemies >= FIGHT.fleeEnemies then
+        add(2, enemies .. " enemies on you")
+    elseif solo and enemies >= 2 then
+        add(1, enemies .. " enemies")
+    end
+    if not IsLiveEnemy("target") then return level, reasons, false end
+    local targetLevel, myLevel = Number(UnitLevel("target")), Number(UnitLevel("player"))
+    if targetLevel == -1 then return 2, reasons, true end
+    local class = UnitClassification("target")
+    local elite = not Secret(class) and (class == "elite" or class == "rareelite" or class == "worldboss")
+    local diff = targetLevel and myLevel and targetLevel - myLevel
+    if elite and solo and diff and diff >= FIGHT.fleeEliteLevels then
+        add(2, string.format("elite +%d", diff))
+    elseif elite and solo then
+        add(1, "elite")
+    elseif diff and diff >= FIGHT.riskyLevels then
+        add(1, string.format("+%d levels", diff))
+    end
+    return level, reasons, false
+end
+
+local function Seconds(value)
+    if value == math.huge then return "--" end
+    return string.format("~%ds", math.ceil(value))
+end
+
+-- Records health and predicts who drops first from the last few seconds:
+-- your health vs your target's, plus a fresh mob for every extra enemy on you.
+local function HealthRace(enemies)
+    local now = GetTime()
+    local me = HealthPct("player")
+    if not me then return nil end
+    local guid = IsLiveEnemy("target") and UnitGUID("target") or nil
+    if Secret(guid) then guid = nil end
+    local them = guid and HealthPct("target")
+    local samples = fight.samples
+    table.insert(samples, { t = now, me = me, them = them, guid = guid })
+    while samples[1] and samples[1].t < now - FIGHT.window do table.remove(samples, 1) end
+
+    local first = samples[1]
+    if not them or now - first.t < FIGHT.minWindow then return nil end
+    -- Oldest reading of the current target; switching targets restarts its history.
+    local firstThem
+    for _, sample in ipairs(samples) do
+        if sample.guid == guid and sample.them then firstThem = sample; break end
+    end
+    local span = now - firstThem.t
+    if span < FIGHT.minWindow then return nil end
+
+    local myLoss = first.me - me
+    local myRate = myLoss / (now - first.t)
+    local theirRate = (firstThem.them - them) / span
+    local myTime = myRate > 0 and me / myRate or math.huge
+    local theirTime = theirRate > 0 and (them + (enemies - 1) * 100) / theirRate or math.huge
+
+    if myLoss >= FIGHT.minDrop and myTime * FIGHT.margin < theirTime then
+        return 2, string.format("FLEE! You die in %s, enemies in %s", Seconds(myTime), Seconds(theirTime))
+    elseif myLoss >= FIGHT.minDrop and myTime < theirTime * FIGHT.margin then
+        return 1, string.format("Close fight: you %s, enemies %s", Seconds(myTime), Seconds(theirTime))
+    elseif myTime == math.huge then
+        return 0, "Winning"
+    end
+    return 0, string.format("Winning: you %s, enemies %s", Seconds(myTime), Seconds(theirTime))
+end
+
+local function FleeAlert(text)
+    local color = FIGHT_COLORS[2]
+    if RaidNotice_AddMessage and RaidWarningFrame then
+        RaidNotice_AddMessage(RaidWarningFrame, text, { r = color[1], g = color[2], b = color[3] })
+    elseif UIErrorsFrame then
+        UIErrorsFrame:AddMessage(text, color[1], color[2], color[3])
+    end
+    if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
+end
+
+local function SetBorder(color)
+    if panel then panel:SetBackdropBorderColor(color[1], color[2], color[3], 1) end
+end
+
+local function EndFight()
+    if not fight then return end
+    fight = nil
+    SetBorder(BORDER_COLOR)
+end
+
+-- Runs every second in combat: a verdict on the readiness line, a red HUD border
+-- while it says flee, and one center-screen warning + sound per fight.
+local function RefreshFight()
+    fight = fight or { samples = {}, alerted = false }
+    local enemies = EnemiesOnYou()
+    local pullLevel, reasons, skull = AssessPull(enemies)
+    local raceLevel, raceText = HealthRace(math.max(1, enemies))
+
+    local level, text
+    if skull then
+        level, text = 2, "FLEE! Skull-level target"
+    elseif raceLevel then
+        -- The health trend decides, but pull risks stay visible as context.
+        level = math.max(raceLevel, math.min(pullLevel, 1))
+        text = raceText
+        if raceLevel < 2 and #reasons > 0 then text = text .. "  ·  " .. table.concat(reasons, ", ") end
+    else
+        local me = HealthPct("player")
+        level = pullLevel
+        if pullLevel > 0 then
+            text = (pullLevel == 2 and "FLEE! " or "Risky: ") .. table.concat(reasons, ", ")
+        end
+        if me and me < FIGHT.lowHealthPct then
+            level, text = 2, string.format("FLEE! Health at %d%%", math.floor(me))
+        end
+        if not text then
+            -- Nothing readable to judge by (e.g. secret health): stay neutral.
+            if not me then SetReadiness("In combat", {0.60, 0.66, 0.72}); return end
+            text = "Fight looks OK"
+        end
+    end
+
+    SetReadiness(text, FIGHT_COLORS[level])
+    SetBorder(level == 2 and FIGHT_COLORS[2] or BORDER_COLOR)
+    if level == 2 and not fight.alerted then
+        fight.alerted = true
+        FleeAlert(text)
+    end
+end
+
+-- Out of combat: the between-pulls checklist. In combat: the fight verdict.
 local function RefreshReadiness()
     if not labels.ready then return end
-    if UnitIsDeadOrGhost("player") then SetReadiness("", {1, 1, 1}); return end
-    local inCombat = UnitAffectingCombat("player")
-    if Secret(inCombat) or inCombat then
-        SetReadiness("In combat", {0.60, 0.66, 0.72})
+    if UnitIsDeadOrGhost("player") then
+        EndFight()
+        SetReadiness("", {1, 1, 1})
         return
     end
+    local inCombat = UnitAffectingCombat("player")
+    if Secret(inCombat) or inCombat then
+        RefreshFight()
+        return
+    end
+    EndFight()
 
     local alerts = {}
     if not IsPlayerSpell or IsPlayerSpell(BATTLE_SHOUT_ID) then
@@ -558,12 +752,9 @@ local function RefreshReadiness()
         end
     end
 
-    local health, healthMax = Number(UnitHealth("player")), Number(UnitHealthMax("player"))
-    if health and healthMax and healthMax > 0 then
-        local pct = health * 100 / healthMax
-        if pct < READY.healthPct then
-            alerts[#alerts+1] = string.format("Eat/bandage (%d%% HP)", math.floor(pct))
-        end
+    local pct = HealthPct("player")
+    if pct and pct < READY.healthPct then
+        alerts[#alerts+1] = string.format("Eat/bandage (%d%% HP)", math.floor(pct))
     end
 
     local durability = LowestDurabilityPct()
