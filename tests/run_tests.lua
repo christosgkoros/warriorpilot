@@ -408,7 +408,7 @@ end)
 test("never shows the Overpower tip before learning it, and never repeats a tip", function()
     login({ known = { [6673] = true } })
     local previous = tip()
-    for _ = 1, 20 do
+    for _ = 1, 100 do
         wow.slash("tip")
         local current = tip()
         hasNot(current, "Overpower", "tip")
@@ -420,11 +420,55 @@ end)
 test("shows the Overpower tip once it is learned", function()
     login({ known = { [6673] = true, [7384] = true } })
     local seen = false
-    for _ = 1, 10 do
+    for _ = 1, 100 do
         wow.slash("tip")
         if tip():find("Overpower", 1, true) then seen = true end
     end
     assert(seen, "Overpower tip never shown")
+end)
+
+local KNOWS_EVERYTHING = setmetatable({}, { __index = function() return true end })
+
+test("has plenty of tips, each short enough for the tip bar", function()
+    login({ known = KNOWS_EVERYTHING })
+    local seen, count = {}, 0
+    for _ = 1, 200 do
+        wow.slash("tip")
+        local text = tip()
+        assert(#text <= 90, string.format("tip too long (%d chars): %s", #text, text))
+        if not seen[text] then seen[text], count = true, count + 1 end
+    end
+    assert(count >= 50, "only " .. count .. " distinct tips")
+end)
+
+test("a new character only sees tips for abilities it knows", function()
+    login({ known = {} })
+    for _ = 1, 100 do
+        wow.slash("tip")
+        for _, ability in ipairs({ "Charge", "Execute", "Whirlwind", "Mortal Strike" }) do
+            hasNot(tip(), ability, "tip")
+        end
+    end
+end)
+
+test("rotates the tip every 3 minutes", function()
+    login()
+    local first = tip()
+    wow.advance(170)
+    eq(tip(), first, "before 3 minutes")
+    wow.advance(10)
+    assert(tip() ~= first, "tip did not rotate after 3 minutes")
+end)
+
+test("clicking a tip restarts the rotation timer", function()
+    login()
+    wow.advance(150)
+    wow.slash("tip")
+    local clicked = tip()
+    wow.advance(60) -- 210 s since login, but only 60 s since the click
+    eq(tip(), clicked, "tip after click")
+    wow.advance(120)
+    assert(tip() ~= clicked, "tip did not rotate 3 minutes after the click")
 end)
 
 test("/wpl lock lets clicks pass through the panel", function()
