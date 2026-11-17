@@ -1,9 +1,10 @@
--- WarriorPilot Lite 1.4.2 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.5.0 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
+-- The one thing it changes is minimap tracking, kept on out of combat (/wpl track).
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.4.2"
+local VERSION = "1.5.0"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -746,6 +747,94 @@ local function RefreshFight()
     end
 end
 
+-- Minimap tracking kept on out of combat, in priority order. Types this character
+-- doesn't have (Find Treasure is a Dwarf racial) simply aren't in the tracking list.
+local KEEP_TRACKING = { 2580, 2481 } -- Find Minerals, Find Treasure
+local TRACKING = {
+    gap = 1.5,   -- seconds between any two switches (the global cooldown)
+    retry = 5,   -- seconds before turning the same type on again
+    window = 60, -- this many seconds of attempts are remembered...
+    fights = 3,  -- ...and this many re-enables in it mean two types switch each other off
+}
+local trackingTries = {}   -- [spellID] = times it was turned on, within the window
+local trackingGaveUp = {}  -- [spellID] = true once it keeps switching a higher one off
+local trackingBlocked = false
+local trackingPending = false
+local lastTrackingSwitch = -math.huge
+
+-- The wanted tracking types this character has, highest priority first.
+local function WantedTracking()
+    local found = {}
+    if not (C_Minimap and C_Minimap.GetNumTrackingTypes and C_Minimap.GetTrackingInfo) then return found end
+    local count = Number(C_Minimap.GetNumTrackingTypes()) or 0
+    for _, spellID in ipairs(KEEP_TRACKING) do
+        local name = SpellName(spellID)
+        for index = 1, count do
+            local info = C_Minimap.GetTrackingInfo(index)
+            if info and not Secret(info.active)
+                and (info.spellID == spellID or (name and info.name == name)) then
+                found[#found+1] = { index = index, spellID = spellID, name = info.name, active = info.active }
+                break
+            end
+        end
+    end
+    return found
+end
+
+local KeepTracking
+local function KeepTrackingSoon(delay)
+    if trackingPending then return end
+    trackingPending = true
+    C_Timer.After(delay, function() trackingPending = false; KeepTracking() end)
+end
+
+-- Turns one wanted type back on per pass: where tracking is a cast, the next one
+-- has to wait for the global cooldown. Combat, death and casts wait for later.
+function KeepTracking()
+    if not saved or saved.keepTracking == false or trackingBlocked then return end
+    if not (C_Minimap and C_Minimap.SetTracking) then return end
+    if InCombatLockdown() or UnitIsDeadOrGhost("player") then return end
+    -- Never interrupt a mining cast.
+    if (UnitCastingInfo and UnitCastingInfo("player")) or (UnitChannelInfo and UnitChannelInfo("player")) then
+        KeepTrackingSoon(1)
+        return
+    end
+    local now = GetTime()
+    if now - lastTrackingSwitch < TRACKING.gap then
+        KeepTrackingSoon(lastTrackingSwitch + TRACKING.gap - now)
+        return
+    end
+    local managed = {}
+    for _, entry in ipairs(WantedTracking()) do
+        if not trackingGaveUp[entry.spellID] then managed[#managed+1] = entry end
+    end
+    for _, entry in ipairs(managed) do
+        if not entry.active then
+            local tries = trackingTries[entry.spellID] or {}
+            trackingTries[entry.spellID] = tries
+            while tries[1] and tries[1] < now - TRACKING.window do table.remove(tries, 1) end
+            local wait = tries[#tries] and tries[#tries] + TRACKING.retry - now
+            if wait and wait > 0 then
+                KeepTrackingSoon(wait)
+                return
+            end
+            if #tries >= TRACKING.fights and #managed > 1 then
+                -- Only one can be on at a time here: keep the highest priority one.
+                for i = 2, #managed do trackingGaveUp[managed[i].spellID] = true end
+                trackingTries[managed[1].spellID] = {}
+                Print(string.format("Only one tracking type can be on at a time; keeping %s on.", managed[1].name))
+                KeepTrackingSoon(1)
+                return
+            end
+            tries[#tries+1] = now
+            lastTrackingSwitch = now
+            C_Minimap.SetTracking(entry.index, true)
+            KeepTrackingSoon(TRACKING.gap)
+            return
+        end
+    end
+end
+
 -- Out of combat: the between-pulls checklist. In combat: the fight verdict.
 local function RefreshReadiness()
     if not labels.ready then return end
@@ -760,8 +849,15 @@ local function RefreshReadiness()
         return
     end
     EndFight()
+    KeepTracking()
 
     local alerts = {}
+    if trackingBlocked and saved.keepTracking ~= false then
+        -- The game wouldn't let us switch it on, so remind instead.
+        for _, entry in ipairs(WantedTracking()) do
+            if not entry.active then alerts[#alerts+1] = entry.name .. " off" end
+        end
+    end
     if not IsPlayerSpell or IsPlayerSpell(BATTLE_SHOUT_ID) then
         local remaining = BattleShoutRemaining()
         if remaining == 0 then
@@ -1013,11 +1109,16 @@ local function Cmd(text)
         saved.x, saved.y = 0, 0
         panel:ClearAllPoints(); panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         panel:Show(); saved.visible = true
+    elseif command == "track" then
+        saved.keepTracking = saved.keepTracking == false
+        trackingGaveUp, trackingTries = {}, {}
+        Print(saved.keepTracking and "Keeping Find Minerals / Find Treasure on." or "No longer changing minimap tracking.")
+        KeepTracking()
     elseif command == "debug" then
         saved.debug = not saved.debug
         Print(saved.debug and "Mining debug ON (prints spell IDs)." or "Mining debug OFF.")
     elseif command == "help" then
-        Print("/wpl [toggle | show | hide | stats | history | levels | export | reset | tip | lock | center | debug | help]")
+        Print("/wpl [toggle | show | hide | stats | history | levels | export | reset | tip | lock | center | track | debug | help]")
         Print("Ore is counted from YOUR loot messages. Mining casts are attempts, not unique veins.")
     else
         Print("Unknown command. Type /wpl help.")
@@ -1059,6 +1160,11 @@ events:SetScript("OnEvent", function(self, event, ...)
         self:RegisterUnitEvent("UNIT_MAXPOWER", "player")
         self:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
         self:RegisterUnitEvent("UNIT_AURA", "player")
+        -- Tracking can switch off on death or by hand, and the HUD may be hidden.
+        self:RegisterEvent("MINIMAP_UPDATE_TRACKING")
+        self:RegisterEvent("PLAYER_ALIVE")
+        self:RegisterEvent("PLAYER_UNGHOST")
+        self:RegisterEvent("ADDON_ACTION_BLOCKED")
         WPL.Refresh()
         Print("Loaded. /wpl help for commands. Drag to reposition.")
         return
@@ -1101,6 +1207,15 @@ events:SetScript("OnEvent", function(self, event, ...)
         FlushLevelTime()
     elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
         RefreshReadiness()
+    elseif event == "MINIMAP_UPDATE_TRACKING" or event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" then
+        KeepTracking()
+    elseif event == "ADDON_ACTION_BLOCKED" then
+        local addon = ...
+        if addon == "WarriorPilotLite" and not trackingBlocked then
+            trackingBlocked = true
+            Print("The game won't let addons switch tracking on. The HUD will remind you instead.")
+            RefreshReadiness()
+        end
     elseif event == "UNIT_AURA" then
         -- Out of combat only: Battle Shout falling off should show right away.
         if not InCombatLockdown() then RefreshReadiness() end

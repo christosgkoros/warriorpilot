@@ -12,6 +12,7 @@ local SPELL_NAMES = {
     [2580] = "Find Minerals", [2656] = "Smelting",
     [6673] = "Battle Shout", [11551] = "Battle Shout",
     [7384] = "Overpower", [78] = "Heroic Strike",
+    [2481] = "Find Treasure",
 }
 
 local function defaultState()
@@ -31,6 +32,11 @@ local function defaultState()
         -- Other units by token ("target", "nameplate1", ...): { level, health, healthMax,
         -- classification, guid, hostile, dead, inCombat, threat, targetsPlayer }
         units = {},
+        -- Minimap tracking menu: list of { name, spellID, active }.
+        tracking = {},
+        exclusiveTracking = false, -- Classic rule: turning one on turns the others off
+        blockTracking = false,     -- SetTracking is protected: blocked, nothing changes
+        casting = nil,             -- name of the spell being cast, or nil
     }
 end
 
@@ -144,6 +150,25 @@ local function installGlobals(db)
             return 0, 0
         end,
     }
+    _G.C_Minimap = {
+        GetNumTrackingTypes = function() return #s.tracking end,
+        GetTrackingInfo = function(index) return s.tracking[index] end,
+        SetTracking = function(index, on)
+            table.insert(M.trackingCalls, s.tracking[index].name)
+            if s.blockTracking then
+                M.fire("ADDON_ACTION_BLOCKED", "WarriorPilotLite", "C_Minimap.SetTracking()")
+                return
+            end
+            if on and s.exclusiveTracking then
+                for _, info in ipairs(s.tracking) do info.active = false end
+            end
+            s.tracking[index].active = on
+            -- The game reports the change a moment later, not inside the call.
+            table.insert(M.timers, { at = s.now, fn = function() M.fire("MINIMAP_UPDATE_TRACKING") end })
+        end,
+    }
+    _G.UnitCastingInfo = function() return s.casting end
+    _G.UnitChannelInfo = function() return nil end
     _G.RaidWarningFrame = {}
     _G.RaidNotice_AddMessage = function(_, text) table.insert(M.alerts, text) end
     _G.SOUNDKIT = { RAID_WARNING = 8959 }
@@ -159,6 +184,7 @@ function M.load(addonPath, db, overrides, state)
     M.state = state or defaultState()
     for key, value in pairs(overrides or {}) do M.state[key] = value end
     M.frames, M.fontStrings, M.chat, M.timers, M.alerts, M.sounds = {}, {}, {}, {}, {}, {}
+    M.trackingCalls = {}
     installGlobals(db)
     local chunk = assert(loadfile(addonPath))
     chunk("WarriorPilotLite", {})

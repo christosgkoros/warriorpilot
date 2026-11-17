@@ -605,6 +605,108 @@ test("resets the border and alert after the fight", function()
 end)
 
 ---------------------------------------------------------------------------
+-- Minimap tracking
+---------------------------------------------------------------------------
+
+local function trackingMenu(withTreasure)
+    local menu = {
+        { name = "Find Herbs", spellID = 2383, active = false },
+        { name = "Find Minerals", spellID = 2580, active = false },
+    }
+    if withTreasure then menu[#menu+1] = { name = "Find Treasure", spellID = 2481, active = false } end
+    return menu
+end
+local function tracked(name)
+    for _, info in ipairs(wow.state.tracking) do
+        if info.name == name then return info.active end
+    end
+end
+
+test("turns Find Minerals and Find Treasure on at login, one per global cooldown", function()
+    login({ tracking = trackingMenu(true) })
+    eq(tracked("Find Minerals"), true, "minerals right away")
+    eq(tracked("Find Treasure"), false, "treasure waits for the GCD")
+    wow.advance(2)
+    eq(tracked("Find Treasure"), true, "treasure")
+    eq(tracked("Find Herbs"), false, "other types untouched")
+    wow.advance(10)
+    eq(#wow.trackingCalls, 2, "nothing more to do")
+end)
+
+test("only uses the tracking types this character has", function()
+    login({ tracking = trackingMenu(false) })
+    wow.advance(3)
+    eq(tracked("Find Minerals"), true, "minerals")
+    eq(#wow.trackingCalls, 1, "no Find Treasure to turn on")
+end)
+
+test("turns tracking back on after combat, death or switching it off by hand", function()
+    login({ tracking = trackingMenu(true) })
+    wow.advance(2)
+
+    wow.state.inCombat = true
+    wow.fire("PLAYER_REGEN_DISABLED")
+    wow.state.tracking[2].active = false
+    wow.fire("MINIMAP_UPDATE_TRACKING")
+    wow.advance(6)
+    eq(tracked("Find Minerals"), false, "left alone in combat")
+    wow.state.inCombat = false
+    wow.fire("PLAYER_REGEN_ENABLED")
+    eq(tracked("Find Minerals"), true, "back on after combat")
+
+    wow.advance(6)
+    wow.state.dead = true
+    wow.state.tracking[2].active, wow.state.tracking[3].active = false, false
+    wow.fire("MINIMAP_UPDATE_TRACKING")
+    eq(tracked("Find Minerals"), false, "not while dead")
+    wow.state.dead = false
+    wow.fire("PLAYER_UNGHOST")
+    wow.advance(2)
+    eq(tracked("Find Minerals"), true, "minerals after reviving")
+    eq(tracked("Find Treasure"), true, "treasure after reviving")
+end)
+
+test("never interrupts a cast to turn tracking on", function()
+    login({ tracking = trackingMenu(true), casting = "Mining" })
+    eq(tracked("Find Minerals"), false, "waits during the cast")
+    wow.state.casting = nil
+    wow.advance(1)
+    eq(tracked("Find Minerals"), true, "after the cast")
+end)
+
+test("keeps only Find Minerals when the game allows one tracking type at a time", function()
+    login({ tracking = trackingMenu(true), exclusiveTracking = true })
+    wow.chat = {}
+    for _ = 1, 60 do wow.advance(1) end
+    eq(tracked("Find Minerals"), true, "minerals wins")
+    eq(tracked("Find Treasure"), false, "treasure given up")
+    local calls = #wow.trackingCalls
+    for _ = 1, 60 do wow.advance(1) end
+    eq(#wow.trackingCalls, calls, "stops switching back and forth")
+    has(table.concat(wow.chat, "\n"), "keeping Find Minerals on", "explains once")
+end)
+
+test("/wpl track stops changing tracking, and turns it back on", function()
+    login({ tracking = trackingMenu(true) })
+    has(wow.slash("track"), "No longer changing", "off")
+    wow.advance(5)
+    eq(tracked("Find Treasure"), false, "left off")
+    has(wow.slash("track"), "Keeping Find Minerals", "on")
+    wow.advance(2)
+    eq(tracked("Find Treasure"), true, "turned on again")
+    wow.reload(ADDON)
+    eq(_G.WarriorPilotLiteDB.keepTracking, true, "setting saved")
+end)
+
+test("reminds instead when the game blocks switching tracking", function()
+    login({ tracking = trackingMenu(true), blockTracking = true })
+    wow.advance(5)
+    eq(#wow.trackingCalls, 1, "tries once")
+    has(ready(), "Find Minerals off", "reminder")
+    has(ready(), "Find Treasure off", "reminder")
+end)
+
+---------------------------------------------------------------------------
 -- Tips and HUD controls
 ---------------------------------------------------------------------------
 
