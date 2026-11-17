@@ -13,6 +13,7 @@ local SPELL_NAMES = {
     [6673] = "Battle Shout", [11551] = "Battle Shout",
     [7384] = "Overpower", [78] = "Heroic Strike",
     [2481] = "Find Treasure",
+    [72] = "Shield Bash", [5242] = "Battle Shout", [6572] = "Revenge", [1160] = "Demoralizing Shout",
 }
 
 local function defaultState()
@@ -37,6 +38,12 @@ local function defaultState()
         exclusiveTracking = false, -- Classic rule: turning one on turns the others off
         blockTracking = false,     -- SetTracking is protected: blocked, nothing changes
         casting = nil,             -- name of the spell being cast, or nil
+        faction = "Alliance",
+        quests = {},          -- quest log: list of { questID, title, complete }
+        completedQuests = {}, -- [questID] = true once turned in
+        items = {},           -- [itemID] = count in your bags
+        talentPoints = 0,
+        trainer = nil,        -- TrainerSpellsBuiltin, as the TrainerSpells addon defines it
     }
 end
 
@@ -167,6 +174,22 @@ local function installGlobals(db)
             table.insert(M.timers, { at = s.now, fn = function() M.fire("MINIMAP_UPDATE_TRACKING") end })
         end,
     }
+    _G.UnitFactionGroup = function() return s.faction end
+    _G.UnitCharacterPoints = function() return s.talentPoints end
+    _G.C_Item = { GetItemCount = function(id) return s.items[id] or 0 end }
+    _G.C_QuestLog = {
+        GetNumQuestLogEntries = function() return #s.quests end,
+        GetInfo = function(index)
+            local q = s.quests[index]
+            return q and { questID = q.questID, title = q.title, isHeader = false }
+        end,
+        IsComplete = function(id)
+            for _, q in ipairs(s.quests) do if q.questID == id then return q.complete == true end end
+            return false
+        end,
+        IsQuestFlaggedCompleted = function(id) return s.completedQuests[id] == true end,
+    }
+    _G.TrainerSpellsBuiltin = s.trainer
     _G.UnitCastingInfo = function() return s.casting end
     _G.UnitChannelInfo = function() return nil end
     _G.RaidWarningFrame = {}

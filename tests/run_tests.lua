@@ -707,6 +707,116 @@ test("reminds instead when the game blocks switching tracking", function()
 end)
 
 ---------------------------------------------------------------------------
+-- Next steps guide
+---------------------------------------------------------------------------
+
+local TRAINER = { WARRIOR = {
+    [1] = { [6673] = { cost = 10, rank = 1 } },
+    [12] = { [72] = { cost = 900, rank = 1 }, [5242] = { cost = 900, rank = 2 }, [7384] = { cost = 900, rank = 1 } },
+    [14] = { [6572] = { cost = 1100, rank = 1 }, [1160] = { cost = 1100, rank = 1 } },
+} }
+-- The HUD's NEXT STEPS lines, top to bottom, without color codes.
+local function steps()
+    local lines = {}
+    for i = 1, 4 do
+        local text = wow.label("TOPLEFT", 18, -303 - 15 * i).text or ""
+        lines[i] = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    end
+    return lines
+end
+local function stepsText() return table.concat(steps(), "\n") end
+local function level12(overrides)
+    local state = { level = 12, trainer = TRAINER }
+    for k, v in pairs(overrides or {}) do state[k] = v end
+    login(state)
+end
+
+test("lists trainer skills you can learn now, with the cost, and the zone", function()
+    level12()
+    local lines = steps()
+    eq(lines[1], "Train  Battle Shout 2, Overpower, Shield Bash (27s)", "train")
+    eq(lines[2], "Zone  Loch Modan (Thelsamar), or Westfall / Darkshore (12-18)", "zone after the actions")
+    eq(lines[3], "", "unused lines stay empty")
+end)
+
+test("shows the next skill level once everything is trained", function()
+    level12({ known = { [6673] = true, [72] = true, [5242] = true, [7384] = true } })
+    has(stepsText(), "Next  at 14: Demoralizing Shout, Revenge", "next skills")
+    hasNot(stepsText(), "Train", "nothing to train")
+end)
+
+test("puts quests ready to turn in first, and drops them once turned in", function()
+    level12({
+        quests = { { questID = 1681, title = "Ironband's Compound" }, { questID = 267, title = "The Trogg Threat" } },
+        items = { [6800] = 1 },
+    })
+    eq(steps()[1], "Turn in  Umbral Ore to Tormus Deepforge (Ironforge)", "item in bags")
+
+    wow.state.quests = { { questID = 267, title = "The Trogg Threat", complete = true } }
+    wow.state.completedQuests[1681] = true
+    wow.fire("QUEST_TURNED_IN", 1681, 0)
+    wow.advance(1)
+    eq(steps()[1], "Turn in  1 done: The Trogg Threat", "other finished quests")
+end)
+
+test("guides the Hall of Thanes run until its quest is turned in", function()
+    level12({ level = 13, known = { [6673] = true, [72] = true, [5242] = true, [7384] = true },
+        quests = { { questID = 96393, title = "Old Ironforge Incursion" } } })
+    has(stepsText(), "Quest  Hall of Thanes: kill Durgen Dirgehammer", "quest")
+    has(stepsText(), "Dungeon  Hall of Thanes (13-18)", "dungeon")
+
+    wow.state.quests = {}
+    wow.state.completedQuests[96393] = true
+    wow.fire("QUEST_REMOVED", 96393)
+    wow.advance(1)
+    hasNot(stepsText(), "Hall of Thanes (13-18)", "dungeon done")
+    has(stepsText(), "Quest  Important Heirlooms: Thom Filch", "pickup still listed")
+end)
+
+test("updates the zone, dungeon and skills as you level", function()
+    level12({ known = { [6673] = true, [72] = true, [5242] = true, [7384] = true } })
+    levelUp(14, 0, 12000)
+    wow.fire("PLAYER_LEVEL_UP", 14)
+    wow.advance(1)
+    has(stepsText(), "Train  Demoralizing Shout, Revenge (22s)", "level 14 skills")
+    levelUp(23, 0, 30000)
+    wow.fire("PLAYER_LEVEL_UP", 23)
+    wow.advance(1)
+    has(stepsText(), "Zone  Wetlands (Menethil Harbor) (21-25)", "level 23 zone")
+    has(stepsText(), "Dungeon  Blackfathom Deeps (22-28)", "level 23 dungeon")
+end)
+
+test("reminds about unspent talent points first and keeps four lines", function()
+    level12({ talentPoints = 2, items = { [6800] = 1 },
+        quests = { { questID = 1681, title = "Ironband's Compound" }, { questID = 96393, title = "Old Ironforge Incursion" } } })
+    local lines = steps()
+    eq(lines[1], "Talents  Spend 2 points", "talents")
+    eq(lines[2], "Turn in  Umbral Ore to Tormus Deepforge (Ironforge)", "turn in")
+    eq(lines[3], "Train  Battle Shout 2, Overpower, Shield Bash (27s)", "train")
+    has(lines[4], "Zone  Loch Modan", "zone always last")
+end)
+
+test("works without TrainerSpells and skips the Alliance route for the Horde", function()
+    login({ level = 12 })
+    hasNot(stepsText(), "Train", "no trainer data")
+    has(stepsText(), "Zone  Loch Modan", "zone")
+    login({ level = 12, faction = "Horde" })
+    hasNot(stepsText(), "Zone", "no Alliance route for the Horde")
+end)
+
+test("/wpl guide prints every next step", function()
+    level12({ items = { [6800] = 1 }, quests = { { questID = 1681, title = "Ironband's Compound" } } })
+    local out = wow.slash("guide")
+    has(out, "Next steps at level 12:", "header")
+    has(out, "Train now: Battle Shout 2, Overpower, Shield Bash (27s)", "train")
+    has(out, "New skills at 14: Demoralizing Shout, Revenge", "next")
+    has(out, "Turn in: Umbral Ore to Tormus Deepforge", "turn in")
+    hasNot(out, "Pick up: Important Heirlooms", "Hall of Thanes pickups wait for level 13")
+    has(out, "Zone: Loch Modan (Thelsamar), or Westfall / Darkshore (12-18); then Redridge Mountains (Lakeshire) at 18", "zones")
+    has(out, "Focus: Weapon damage is nearly all of your damage", "focus")
+end)
+
+---------------------------------------------------------------------------
 -- Tips and HUD controls
 ---------------------------------------------------------------------------
 

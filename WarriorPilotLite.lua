@@ -1,10 +1,10 @@
--- WarriorPilot Lite 1.5.0 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.6.0 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- The one thing it changes is minimap tracking, kept on out of combat (/wpl track).
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.5.0"
+local VERSION = "1.6.0"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -70,6 +70,8 @@ local miningName
 
 -- The tip rotates on its own this often; clicking it shows the next one right away.
 local TIP_ROTATE_SECONDS = 180
+-- Lines in the HUD's NEXT STEPS section (see BuildGuide).
+local GUIDE_LINES = 4
 
 -- `spell` = only show once the character knows that spell (any rank counts).
 -- Keep each tip under ~90 characters so it fits on two lines of the tip bar.
@@ -377,7 +379,7 @@ end
 
 local function BuildPanel()
     panel = CreateFrame("Frame", "WarriorPilotLiteFrame", UIParent, "BackdropTemplate")
-    panel:SetSize(310, 345)
+    panel:SetSize(310, 420)
     panel:SetClampedToScreen(true)
     panel:SetMovable(true)
     panel:RegisterForDrag("LeftButton")
@@ -456,6 +458,17 @@ local function BuildPanel()
     labels.ready = MakeLabel(panel, "", 11, {0.55, 0.85, 0.55})
     labels.ready:SetPoint("TOPLEFT", 18, -278)
     labels.ready:SetWidth(274)
+
+    local steps = MakeLabel(panel, "NEXT STEPS", 9, {0.57, 0.64, 0.71})
+    steps:SetPoint("TOPLEFT", 18, -303)
+    labels.guide = {}
+    for i = 1, GUIDE_LINES do
+        local line = MakeLabel(panel, "", 10, {0.83, 0.85, 0.91})
+        line:SetPoint("TOPLEFT", 18, -303 - 15 * i)
+        line:SetWidth(274)
+        line:SetWordWrap(false)
+        labels.guide[i] = line
+    end
 
     local tipButton = CreateFrame("Button", nil, panel)
     tipButton:SetPoint("BOTTOMLEFT", 18, 11)
@@ -835,6 +848,245 @@ function KeepTracking()
     end
 end
 
+-- Next steps: what to train, turn in, run and where to quest, re-checked against
+-- your level, quest log, bags and known spells. Route data is for the Alliance,
+-- from WoW Forever leveling guides (Nov 2026); trainer skills are read live from
+-- the TrainerSpells addon's Forever data when it is installed.
+local GUIDE_ZONES = {
+    { 1, 6, "Your starting valley" },
+    { 6, 12, "Dun Morogh (Kharanos) / Elwynn / Teldrassil" },
+    { 12, 18, "Loch Modan (Thelsamar), or Westfall / Darkshore" },
+    { 18, 21, "Redridge Mountains (Lakeshire)" },
+    { 21, 25, "Wetlands (Menethil Harbor)" },
+    { 25, 27, "Duskwood (Darkshire), Ashenvale" },
+    { 27, 30, "Wetlands, Hillsbrad Foothills, Duskwood" },
+    { 30, 36, "Arathi, Stranglethorn, Desolace, Alterac" },
+    { 36, 40, "Riverglades, Shen'dralas, Dustwallow, Badlands" },
+    { 40, 48, "Tanaris, Feralas, Hinterlands, Searing Gorge" },
+    { 48, 55, "Un'Goro, Felwood, Azshara, Blasted Lands" },
+    { 55, 61, "Burning Steppes, Plaguelands, Winterspring, Hyjal" },
+}
+-- { from, to, name, note, questID that marks it done (optional) }
+local GUIDE_DUNGEONS = {
+    { 13, 18, "Hall of Thanes", "under Ironforge; Ironforge Greathammer", 96393 },
+    { 18, 22, "The Deadmines", "Westfall" },
+    { 22, 28, "Blackfathom Deeps", "Ashenvale" },
+    { 25, 29, "The Stockade", "Stormwind; quick with the quests" },
+    { 27, 31, "Excavation Site: Wetlands", "after the Wetlands quests" },
+    { 30, 33, "City of Dalaran", "after the key chain" },
+    { 30, 38, "Gnomeregan", "Dun Morogh" },
+    { 37, 40, "The Drowned City", "5 quests" },
+    { 40, 45, "Krol'dok Stronghold", "9 Alliance quests" },
+    { 40, 46, "Uldaman", "Badlands" },
+    { 44, 50, "Zul'Farrak", "Tanaris" },
+    { 46, 52, "Maraudon", "Desolace" },
+    { 50, 53, "Alcaz Prison", "5 quests" },
+    { 50, 56, "Temple of Atal'Hakkar", "Swamp of Sorrows" },
+    { 52, 60, "Blackrock Depths", "most quests of any dungeon" },
+    { 57, 60, "Blackmaw Hold", "6 quests" },
+    { 58, 60, "Shaper's Terrace", "needs Un'Goro crystals" },
+}
+-- Milestone quests. `todo` shows while it's in your log, `ready` once it can be
+-- turned in (objectives done, or `item` in your bags), `pickup` while it isn't
+-- in your log yet. Turned-in quests disappear.
+local GUIDE_QUESTS = {
+    { id = 1681, level = 10, item = 6800, todo = "Ironband's Compound: Umbral Ore, east Dun Morogh",
+      ready = "Umbral Ore to Tormus Deepforge (Ironforge)" },
+    { id = 414, level = 10, todo = "Stout to Kadrell: deliver the cask in Thelsamar" },
+    { id = 96393, level = 13, todo = "Hall of Thanes: kill Durgen Dirgehammer",
+      ready = "Durgen's head to King Magni: Ironforge Greathammer" },
+    { id = 96403, level = 13, todo = "Hall of Thanes: 8 Dwarven Heirlooms",
+      pickup = "Important Heirlooms: Thom Filch, by the Hall of Thanes bridge" },
+    { id = 96394, level = 13, todo = "Hall of Thanes: The Restless Dead (inside)" },
+    { id = 96395, level = 13, todo = "Hall of Thanes: kill Faldrim Anvilmar" },
+    { id = 312, level = 14, todo = "MacGrann's Stash: yeti cave, Dun Morogh (careful)" },
+}
+local GUIDE_FOCUS = {
+    { 10, 60, "Weapon damage is nearly all of your damage: upgrade weapons first (slow two-handers)." },
+    { 10, 60, "Fight mobs at or below your level: Forever's attack table punishes higher ones." },
+    { 1, 60, "Rest at a campfire between sessions, and eat crafted food for its XP bonus." },
+    { 1, 60, "Keep Cooking and First Aid up: food buffs, campfires and bandages save downtime." },
+}
+local guideDirty = true
+local lastGuide = 0
+
+local function Colored(tag, text) return "|cffffc46b" .. tag .. "|r  " .. text end
+
+local function FormatMoney(copper)
+    local gold, silver = math.floor(copper / 10000), math.floor(copper / 100) % 100
+    if gold > 0 then return string.format("%dg %ds", gold, silver) end
+    if silver > 0 then return silver .. "s" end
+    return (copper % 100) .. "c"
+end
+
+local function ItemCount(itemID)
+    local count = C_Item and C_Item.GetItemCount and C_Item.GetItemCount(itemID)
+        or (GetItemCount and GetItemCount(itemID))
+    return Number(count) or 0
+end
+
+local function QuestDone(questID)
+    if C_QuestLog and C_QuestLog.IsQuestFlaggedCompleted then
+        return C_QuestLog.IsQuestFlaggedCompleted(questID) and true or false
+    end
+    return IsQuestFlaggedCompleted and IsQuestFlaggedCompleted(questID) and true or false
+end
+
+-- Your quest log as { [questID] = { title, complete } }.
+local function QuestLog()
+    local log = {}
+    if C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo then
+        for i = 1, Number(C_QuestLog.GetNumQuestLogEntries()) or 0 do
+            local info = C_QuestLog.GetInfo(i)
+            if info and not info.isHeader and info.questID then
+                local complete = C_QuestLog.IsComplete and C_QuestLog.IsComplete(info.questID)
+                log[info.questID] = { title = info.title, complete = complete and true or false }
+            end
+        end
+    elseif GetNumQuestLogEntries and GetQuestLogTitle then
+        for i = 1, Number((GetNumQuestLogEntries())) or 0 do
+            local title, _, _, isHeader, _, isComplete, _, questID = GetQuestLogTitle(i)
+            if not isHeader and questID then log[questID] = { title = title, complete = isComplete == 1 } end
+        end
+    end
+    return log
+end
+
+local function SpellLabel(spellID, rank)
+    local name = SpellName(spellID)
+    if not name or Secret(name) then return nil end
+    return (rank and rank > 1) and (name .. " " .. rank) or name
+end
+
+-- Trainer skills you can learn now, and the next level that brings new ones.
+local function TrainerSkills(level)
+    local data = TrainerSpellsBuiltin and TrainerSpellsBuiltin.WARRIOR
+    if type(data) ~= "table" or not IsPlayerSpell then return nil end
+    local now, cost, nextLevel = {}, 0, nil
+    local levels = {}
+    for spellLevel in pairs(data) do levels[#levels+1] = spellLevel end
+    table.sort(levels)
+    for _, spellLevel in ipairs(levels) do
+        for spellID, info in pairs(data[spellLevel]) do
+            local name = SpellLabel(spellID, info.rank)
+            if name and spellLevel <= level and not IsPlayerSpell(spellID) then
+                now[#now+1] = name
+                cost = cost + (info.cost or 0)
+            end
+        end
+        if spellLevel > level and not nextLevel then nextLevel = spellLevel end
+    end
+    table.sort(now)
+    local upcoming = {}
+    for spellID, info in pairs(nextLevel and data[nextLevel] or {}) do
+        upcoming[#upcoming+1] = SpellLabel(spellID, info.rank)
+    end
+    table.sort(upcoming)
+    return { now = now, cost = cost, nextLevel = nextLevel, upcoming = upcoming }
+end
+
+local function InBand(level, entry) return level >= entry[1] and level <= entry[2] end
+
+-- Everything the guide knows for your current state, highest priority first.
+local function BuildGuide()
+    local level = Number(UnitLevel("player")) or 1
+    local alliance = not UnitFactionGroup or UnitFactionGroup("player") == "Alliance"
+    local guide = { level = level, ready = {}, todo = {}, pickup = {}, dungeons = {}, focus = {} }
+
+    local points = UnitCharacterPoints and Number((UnitCharacterPoints("player")))
+    if points and points > 0 then guide.talents = points end
+    guide.skills = TrainerSkills(level)
+
+    local log = QuestLog()
+    local milestone = {}
+    if alliance then
+        for _, quest in ipairs(GUIDE_QUESTS) do
+            milestone[quest.id] = true
+            local entry = log[quest.id]
+            if entry and (entry.complete or (quest.item and ItemCount(quest.item) > 0)) then
+                guide.ready[#guide.ready+1] = quest.ready or quest.todo
+            elseif entry then
+                guide.todo[#guide.todo+1] = quest.todo
+            elseif quest.pickup and level >= quest.level and not QuestDone(quest.id) then
+                guide.pickup[#guide.pickup+1] = quest.pickup
+            end
+        end
+        for _, zone in ipairs(GUIDE_ZONES) do
+            if InBand(level, zone) then guide.zone = string.format("%s (%d-%d)", zone[3], zone[1], zone[2]) end
+            if zone[1] > level and not guide.nextZone then guide.nextZone = string.format("%s at %d", zone[3], zone[1]) end
+        end
+        for _, dungeon in ipairs(GUIDE_DUNGEONS) do
+            if InBand(level, dungeon) and not (dungeon[5] and QuestDone(dungeon[5])) then
+                guide.dungeons[#guide.dungeons+1] = string.format("%s (%d-%d): %s", dungeon[3], dungeon[1], dungeon[2], dungeon[4])
+            end
+        end
+    end
+    -- Any other quest whose objectives are done.
+    local finished = {}
+    for questID, entry in pairs(log) do
+        if entry.complete and not milestone[questID] and entry.title then finished[#finished+1] = entry.title end
+    end
+    table.sort(finished)
+    guide.finished = finished
+    for _, focus in ipairs(GUIDE_FOCUS) do
+        if InBand(level, focus) then guide.focus[#guide.focus+1] = focus[3] end
+    end
+    return guide
+end
+
+local function GuideLines(guide)
+    local lines = {}
+    local function add(tag, text) if text then lines[#lines+1] = Colored(tag, text) end end
+    if guide.talents then add("Talents", string.format("Spend %d point%s", guide.talents, guide.talents > 1 and "s" or "")) end
+    add("Turn in", guide.ready[1])
+    if not guide.ready[1] and #guide.finished > 0 then
+        add("Turn in", string.format("%d done: %s", #guide.finished, table.concat(guide.finished, ", ")))
+    end
+    local skills = guide.skills
+    if skills and #skills.now > 0 then
+        add("Train", table.concat(skills.now, ", ") .. " (" .. FormatMoney(skills.cost) .. ")")
+    end
+    add("Quest", guide.todo[1] or guide.pickup[1])
+    add("Dungeon", guide.dungeons[1])
+    if skills and #skills.now == 0 and skills.nextLevel then
+        add("Next", string.format("at %d: %s", skills.nextLevel, table.concat(skills.upcoming, ", ")))
+    end
+    while #lines > GUIDE_LINES - 1 do table.remove(lines) end
+    add("Zone", guide.zone)
+    return lines
+end
+
+local function RefreshGuide()
+    if not labels.guide then return end
+    guideDirty, lastGuide = false, GetTime()
+    local lines = GuideLines(BuildGuide())
+    for i, label in ipairs(labels.guide) do label:SetText(lines[i] or "") end
+end
+
+local function ShowGuide()
+    local guide = BuildGuide()
+    local skills = guide.skills
+    Print(string.format("Next steps at level %d:", guide.level))
+    if guide.talents then Print(string.format("  Talents: %d unspent.", guide.talents)) end
+    if skills then
+        if #skills.now > 0 then
+            Print("  Train now: " .. table.concat(skills.now, ", ") .. " (" .. FormatMoney(skills.cost) .. ")")
+        end
+        if skills.nextLevel then
+            Print(string.format("  New skills at %d: %s", skills.nextLevel, table.concat(skills.upcoming, ", ")))
+        end
+    else
+        Print("  Install TrainerSpells to see trainer skills here.")
+    end
+    for _, text in ipairs(guide.ready) do Print("  Turn in: " .. text) end
+    if #guide.finished > 0 then Print("  Done, turn in: " .. table.concat(guide.finished, ", ")) end
+    for _, text in ipairs(guide.todo) do Print("  Quest: " .. text) end
+    for _, text in ipairs(guide.pickup) do Print("  Pick up: " .. text) end
+    if guide.zone then Print("  Zone: " .. guide.zone .. (guide.nextZone and ("; then " .. guide.nextZone) or "")) end
+    for _, text in ipairs(guide.dungeons) do Print("  Dungeon: " .. text) end
+    for _, text in ipairs(guide.focus) do Print("  Focus: " .. text) end
+end
+
 -- Out of combat: the between-pulls checklist. In combat: the fight verdict.
 local function RefreshReadiness()
     if not labels.ready then return end
@@ -896,6 +1148,8 @@ function WPL.Refresh()
 
     RefreshRage()
     RefreshReadiness()
+    -- Events mark the guide stale; the timer catches anything they miss.
+    if guideDirty or GetTime() - lastGuide >= 10 then RefreshGuide() end
 
     local currentXP = Number(UnitXP("player")) or 0
     local maxXP = Number(UnitXPMax("player")) or 1
@@ -1109,6 +1363,8 @@ local function Cmd(text)
         saved.x, saved.y = 0, 0
         panel:ClearAllPoints(); panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         panel:Show(); saved.visible = true
+    elseif command == "guide" then
+        ShowGuide()
     elseif command == "track" then
         saved.keepTracking = saved.keepTracking == false
         trackingGaveUp, trackingTries = {}, {}
@@ -1118,7 +1374,7 @@ local function Cmd(text)
         saved.debug = not saved.debug
         Print(saved.debug and "Mining debug ON (prints spell IDs)." or "Mining debug OFF.")
     elseif command == "help" then
-        Print("/wpl [toggle | show | hide | stats | history | levels | export | reset | tip | lock | center | track | debug | help]")
+        Print("/wpl [toggle | show | hide | stats | history | levels | export | reset | tip | lock | center | guide | track | debug | help]")
         Print("Ore is counted from YOUR loot messages. Mining casts are attempts, not unique veins.")
     else
         Print("Unknown command. Type /wpl help.")
@@ -1165,12 +1421,22 @@ events:SetScript("OnEvent", function(self, event, ...)
         self:RegisterEvent("PLAYER_ALIVE")
         self:RegisterEvent("PLAYER_UNGHOST")
         self:RegisterEvent("ADDON_ACTION_BLOCKED")
+        -- Anything that changes the next steps.
+        for _, guideEvent in ipairs({ "QUEST_ACCEPTED", "QUEST_REMOVED", "QUEST_LOG_UPDATE",
+            "BAG_UPDATE_DELAYED", "SPELLS_CHANGED", "CHARACTER_POINTS_CHANGED" }) do
+            self:RegisterEvent(guideEvent)
+        end
         WPL.Refresh()
         Print("Loaded. /wpl help for commands. Drag to reposition.")
         return
     end
 
     if not session then return end
+    if event == "QUEST_ACCEPTED" or event == "QUEST_REMOVED" or event == "QUEST_LOG_UPDATE"
+        or event == "BAG_UPDATE_DELAYED" or event == "SPELLS_CHANGED" or event == "CHARACTER_POINTS_CHANGED"
+        or event == "QUEST_TURNED_IN" or event == "PLAYER_LEVEL_UP" then
+        guideDirty = true
+    end
     if event == "PLAYER_XP_UPDATE" then
         SampleXP()
         WPL.Refresh()
@@ -1185,7 +1451,7 @@ events:SetScript("OnEvent", function(self, event, ...)
         -- The XP snapshot may still be from the previous level here. Sample a moment
         -- later so the gain shows without waiting for the next kill; SampleXP
         -- ignores stale values, so this can't double-count.
-        C_Timer.After(1, function() SampleXP(); WPL.Refresh() end)
+        C_Timer.After(1, function() SampleXP(); guideDirty = true; WPL.Refresh() end)
         if labels.tip then labels.tip:SetText(AddonTip()) end
     elseif event == "PLAYER_DEAD" then
         session.deaths = session.deaths + 1
