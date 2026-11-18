@@ -1,10 +1,10 @@
--- WarriorPilot Lite 1.7.1 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.8.0 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- The one thing it changes is minimap tracking, kept on out of combat (/wpl track).
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.7.1"
+local VERSION = "1.8.0"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -1019,8 +1019,60 @@ end
 -- Guides disagree on "Two-Handed (Weapon) Specialization"; match either.
 local function TalentKey(name) return (name:lower():gsub(" weapon ", " ")) end
 
--- Your talent tree as the game reports it, with points spent per tab.
-local function ReadTalentTree()
+-- Forever's talents use the modern trait API: one config whose nodes are the
+-- talents. The game itself says whether a rank can be taken now (row unlocked,
+-- prerequisite done), so no tier math is needed here.
+local function TraitTalent(configID, nodeID)
+    local node = C_Traits.GetNodeInfo(configID, nodeID)
+    if type(node) ~= "table" or node.isVisible == false then return nil end
+    local entryID = (type(node.activeEntry) == "table" and node.activeEntry.entryID)
+        or (type(node.entryIDs) == "table" and node.entryIDs[1])
+    local entry = entryID and C_Traits.GetEntryInfo(configID, entryID)
+    local definition = type(entry) == "table" and entry.definitionID and C_Traits.GetDefinitionInfo(entry.definitionID)
+    if type(definition) ~= "table" then return nil end
+    local name = definition.overrideName or (definition.spellID and SpellName(definition.spellID))
+    if type(name) ~= "string" or Secret(name) or name == "" then return nil end
+    return { name = name, rank = Number(node.currentRank) or Number(node.activeRank) or 0,
+        maxRank = Number(node.maxRanks) or 1,
+        takeable = node.canPurchaseRank == true or (node.isAvailable == true and node.meetsEdgeRequirements ~= false) }
+end
+
+local function ReadTraitTree()
+    if not (C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_Traits and C_Traits.GetConfigInfo
+        and C_Traits.GetTreeNodes and C_Traits.GetNodeInfo and C_Traits.GetEntryInfo and C_Traits.GetDefinitionInfo) then
+        return nil
+    end
+    local configID = Number(C_ClassTalents.GetActiveConfigID())
+    local config = configID and C_Traits.GetConfigInfo(configID)
+    if type(config) ~= "table" then return nil end
+    local tree = { byName = {}, spent = {}, total = 0, all = {} }
+    for _, treeID in ipairs(config.treeIDs or {}) do
+        if C_Traits.GetTreeCurrencyInfo then
+            for _, currency in ipairs(C_Traits.GetTreeCurrencyInfo(configID, treeID, false) or {}) do
+                tree.unspent = (tree.unspent or 0) + (Number(currency.quantity) or 0)
+            end
+        end
+        for _, nodeID in ipairs(C_Traits.GetTreeNodes(treeID) or {}) do
+            local talent = TraitTalent(configID, nodeID)
+            if talent then
+                tree.byName[TalentKey(talent.name)] = talent
+                tree.all[#tree.all+1] = talent
+                tree.total = tree.total + talent.rank
+            end
+        end
+    end
+    -- Points per tree (Arms, Fury, Protection) pick the build.
+    if C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfo then
+        for spec = 1, 3 do
+            local ok, _, _, _, _, _, _, spent = pcall(C_SpecializationInfo.GetSpecializationInfo, spec)
+            if ok then tree.spent[spec] = Number(spent) or 0 end
+        end
+    end
+    return tree
+end
+
+-- The classic talent API (GetTalentInfo by tab), for other clients.
+local function ReadClassicTree()
     if not (GetNumTalentTabs and GetNumTalents and GetTalentInfo) then return nil end
     local tree = { byName = {}, spent = {}, total = 0, all = {} }
     local byPos = {}
@@ -1056,9 +1108,11 @@ end
 -- one; an error here must never stop the rest of the guide.
 local talentError
 local function TalentTree()
-    local ok, tree = pcall(ReadTalentTree)
-    if ok then return tree end
-    talentError = tostring(tree)
+    for _, read in ipairs({ ReadTraitTree, ReadClassicTree }) do
+        local ok, tree = pcall(read)
+        if not ok then talentError = tostring(tree)
+        elseif tree and #tree.all > 0 then return tree end
+    end
     return nil
 end
 
@@ -1070,6 +1124,75 @@ local function CharacterPoints()
         end
     end
     return nil
+end
+
+local function EquipLoc(slot)
+    local itemID = GetInventoryItemID and Number(GetInventoryItemID("player", slot))
+    local info = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+    if not itemID or not info then return nil end
+    local _, _, _, equipLoc = info(itemID)
+    return type(equipLoc) == "string" and equipLoc or nil
+end
+
+-- /wpl build picks one; otherwise follow the tree you've spent the most in, and
+-- before your first point, the weapons you wield: shield, two weapons, or a two-hander.
+local function TalentBuild(tree)
+    local chosen = saved and saved.talentBuild
+    if TALENT_BUILDS[chosen] then return chosen end
+    local best, most = nil, 0
+    for key, build in pairs(TALENT_BUILDS) do
+        local spent = tree.spent[build.tab] or 0
+        if spent > most then best, most = key, spent end
+    end
+    if best then return best end
+    local offHand = EquipLoc(17)
+    if offHand == "INVTYPE_SHIELD" then return "prot" end
+    if offHand and offHand:find("WEAPON") then return "fury" end
+    return "arms"
+end
+
+-- The next `count` talent points of the build, one entry per point, picked in
+-- order as if you spent them: each opens up tiers and talents for the next.
+local function TalentPicks(tree, buildKey, count)
+    local perTier = Number(PLAYER_TALENTS_PER_TIER) or 5
+    local ranks, spent, picks = {}, {}, {}
+    for tab, points in pairs(tree.spent) do spent[tab] = points end
+    local function Rank(talent) return ranks[talent] or talent.rank end
+    local function Open(talent, cap)
+        if Rank(talent) >= math.min(cap or talent.maxRank, talent.maxRank) then return false end
+        -- Modern API: only what the game says is open now, so a batch of points can
+        -- stop short of rows they'd unlock. The HUD re-plans after each point.
+        if talent.takeable ~= nil then return talent.takeable end
+        if (spent[talent.tab] or 0) < (talent.tier - 1) * perTier then return false end
+        for _, prereq in ipairs(talent.prereqs) do
+            if Rank(prereq) < prereq.maxRank then return false end
+        end
+        return true
+    end
+    for _ = 1, count do
+        local chosen
+        for _, pick in ipairs(TALENT_BUILDS[buildKey].picks) do
+            local talent = tree.byName[TalentKey(pick[1])]
+            if talent and Open(talent, pick[2]) then chosen = talent; break end
+        end
+        if not chosen then break end
+        ranks[chosen] = Rank(chosen) + 1
+        if chosen.tab then spent[chosen.tab] = (spent[chosen.tab] or 0) + 1 end
+        picks[#picks+1] = { talent = chosen, rank = ranks[chosen] }
+    end
+    return picks
+end
+
+-- "Improved Rend 2/3, Deflection 1/5": one entry per talent, at the rank it ends on.
+local function FormatPicks(picks, from, to)
+    local parts, last = {}, nil
+    for i = from, math.min(to, #picks) do
+        local pick = picks[i]
+        local text = string.format("%s %d/%d", pick.talent.name, pick.rank, pick.talent.maxRank)
+        if last == pick.talent then parts[#parts] = text else parts[#parts+1] = text end
+        last = pick.talent
+    end
+    return table.concat(parts, ", ")
 end
 
 -- /wpl probe: record how this client reports talents, so the advisor can be
@@ -1156,75 +1279,29 @@ local function Probe()
             end
         end
     end
+    if C_SpecializationInfo then
+        for i = 1, 3 do
+            Try("C_SpecializationInfo.GetSpecializationInfo(" .. i .. ")", C_SpecializationInfo.GetSpecializationInfo, i)
+        end
+    end
+    -- What the advisor makes of it.
+    local tree = TalentTree()
+    if tree then
+        out[#out+1] = string.format("advisor: %d talents, unspent %s, spent %s/%s/%s, build %s", #tree.all,
+            tostring(tree.unspent), tostring(tree.spent[1]), tostring(tree.spent[2]), tostring(tree.spent[3]),
+            TalentBuild(tree))
+        local names = {}
+        for _, talent in ipairs(tree.all) do
+            names[#names+1] = string.format("%s %d/%d%s", talent.name, talent.rank, talent.maxRank,
+                talent.takeable and " open" or "")
+        end
+        out[#out+1] = "talents: " .. table.concat(names, "; ")
+    else
+        out[#out+1] = "advisor: no talent tree read (" .. tostring(talentError) .. ")"
+    end
     saved.probe = out
     Print(string.format("Talent probe saved (%d lines). Type /reload so it's written to disk.", #out))
     for i = 1, math.min(#out, 8) do Print("  " .. out[i]) end
-end
-
-local function EquipLoc(slot)
-    local itemID = GetInventoryItemID and Number(GetInventoryItemID("player", slot))
-    local info = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
-    if not itemID or not info then return nil end
-    local _, _, _, equipLoc = info(itemID)
-    return type(equipLoc) == "string" and equipLoc or nil
-end
-
--- /wpl build picks one; otherwise follow the tree you've spent the most in, and
--- before your first point, the weapons you wield: shield, two weapons, or a two-hander.
-local function TalentBuild(tree)
-    local chosen = saved and saved.talentBuild
-    if TALENT_BUILDS[chosen] then return chosen end
-    local best, most = nil, 0
-    for key, build in pairs(TALENT_BUILDS) do
-        local spent = tree.spent[build.tab] or 0
-        if spent > most then best, most = key, spent end
-    end
-    if best then return best end
-    local offHand = EquipLoc(17)
-    if offHand == "INVTYPE_SHIELD" then return "prot" end
-    if offHand and offHand:find("WEAPON") then return "fury" end
-    return "arms"
-end
-
--- The next `count` talent points of the build, one entry per point, picked in
--- order as if you spent them: each opens up tiers and talents for the next.
-local function TalentPicks(tree, buildKey, count)
-    local perTier = Number(PLAYER_TALENTS_PER_TIER) or 5
-    local ranks, spent, picks = {}, {}, {}
-    for tab, points in pairs(tree.spent) do spent[tab] = points end
-    local function Rank(talent) return ranks[talent] or talent.rank end
-    local function Open(talent, cap)
-        if Rank(talent) >= math.min(cap or talent.maxRank, talent.maxRank) then return false end
-        if (spent[talent.tab] or 0) < (talent.tier - 1) * perTier then return false end
-        for _, prereq in ipairs(talent.prereqs) do
-            if Rank(prereq) < prereq.maxRank then return false end
-        end
-        return true
-    end
-    for _ = 1, count do
-        local chosen
-        for _, pick in ipairs(TALENT_BUILDS[buildKey].picks) do
-            local talent = tree.byName[TalentKey(pick[1])]
-            if talent and Open(talent, pick[2]) then chosen = talent; break end
-        end
-        if not chosen then break end
-        ranks[chosen] = Rank(chosen) + 1
-        spent[chosen.tab] = (spent[chosen.tab] or 0) + 1
-        picks[#picks+1] = { talent = chosen, rank = ranks[chosen] }
-    end
-    return picks
-end
-
--- "Improved Rend 2/3, Deflection 1/5": one entry per talent, at the rank it ends on.
-local function FormatPicks(picks, from, to)
-    local parts, last = {}, nil
-    for i = from, math.min(to, #picks) do
-        local pick = picks[i]
-        local text = string.format("%s %d/%d", pick.talent.name, pick.rank, pick.talent.maxRank)
-        if last == pick.talent then parts[#parts] = text else parts[#parts+1] = text end
-        last = pick.talent
-    end
-    return table.concat(parts, ", ")
 end
 
 local function InBand(level, entry) return level >= entry[1] and level <= entry[2] end
@@ -1236,7 +1313,7 @@ local function BuildGuide()
     local guide = { level = level, ready = {}, todo = {}, pickup = {}, dungeons = {}, focus = {} }
 
     local tree = TalentTree()
-    local points = CharacterPoints()
+    local points = tree and tree.unspent or CharacterPoints()
     if not points and tree then points = math.max(0, level - 9 - tree.total) end
     if points and points > 0 then guide.talents = points end
     if tree and #tree.all > 0 then
@@ -1708,9 +1785,12 @@ events:SetScript("OnEvent", function(self, event, ...)
         self:RegisterEvent("PLAYER_UNGHOST")
         self:RegisterEvent("ADDON_ACTION_BLOCKED")
         -- Anything that changes the next steps.
+        -- Some of these don't exist on every client, and registering an unknown
+        -- event is an error.
         for _, guideEvent in ipairs({ "QUEST_ACCEPTED", "QUEST_REMOVED", "QUEST_LOG_UPDATE",
-            "BAG_UPDATE_DELAYED", "SPELLS_CHANGED", "CHARACTER_POINTS_CHANGED" }) do
-            self:RegisterEvent(guideEvent)
+            "BAG_UPDATE_DELAYED", "SPELLS_CHANGED", "CHARACTER_POINTS_CHANGED", "TRAIT_CONFIG_UPDATED",
+            "TRAIT_NODE_CHANGED", "TRAIT_TREE_CURRENCY_INFO_UPDATED", "PLAYER_TALENT_UPDATE" }) do
+            pcall(self.RegisterEvent, self, guideEvent)
         end
         WPL.Refresh()
         Print("Loaded. /wpl help for commands. Drag to reposition.")
@@ -1721,6 +1801,8 @@ events:SetScript("OnEvent", function(self, event, ...)
     if not session then return end
     if event == "QUEST_ACCEPTED" or event == "QUEST_REMOVED" or event == "QUEST_LOG_UPDATE"
         or event == "BAG_UPDATE_DELAYED" or event == "SPELLS_CHANGED" or event == "CHARACTER_POINTS_CHANGED"
+        or event == "TRAIT_CONFIG_UPDATED" or event == "TRAIT_NODE_CHANGED"
+        or event == "TRAIT_TREE_CURRENCY_INFO_UPDATED" or event == "PLAYER_TALENT_UPDATE"
         or event == "QUEST_TURNED_IN" or event == "PLAYER_LEVEL_UP" then
         guideDirty = true
     end

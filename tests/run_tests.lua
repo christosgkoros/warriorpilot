@@ -868,6 +868,43 @@ test("picks the build from your spent points, your weapons, or /wpl build", func
     eq(talentLine(), "Talents  Improved Rend 3/3", "back to auto")
 end)
 
+-- Forever's modern talent tree: the game marks what's open.
+local function traitNodes(ranks)
+    ranks = ranks or {}
+    local function n(name, maxRank, open) return { name = name, rank = ranks[name], maxRank = maxRank, open = open } end
+    return {
+        n("Improved Rend", 3, true), n("Deflection", 5, true), n("Improved Tactical Mastery", 3, false),
+        n("Mortal Strike", 1, false), n("Shield Specialization", 5, true), n("Cruelty", 5, true),
+    }
+end
+
+test("reads Forever's modern talent tree and suggests what the game lets you take", function()
+    login({ level = 16, traitPoints = 1, traitNodes = traitNodes() })
+    eq(talentLine(), "Talents  Improved Rend 1/3", "first pick")
+    has(wow.slash("talents"), "Talents: Improved Rend 1/3", "/wpl talents")
+
+    wow.state.traitPoints = 4
+    wow.state.traitNodes = traitNodes({ ["Improved Rend"] = 2 })
+    wow.fire("TRAIT_NODE_CHANGED", 1001)
+    wow.advance(1)
+    eq(talentLine(), "Talents  Improved Rend 3/3, Deflection 3/5", "closed rows are skipped")
+
+    wow.state.traitPoints = 1
+    wow.state.traitNodes = traitNodes({ ["Improved Rend"] = 3, ["Deflection"] = 2 })
+    wow.state.traitNodes[3].open = true
+    wow.fire("TRAIT_CONFIG_UPDATED", 77)
+    wow.advance(1)
+    eq(talentLine(), "Talents  Improved Tactical Mastery 1/3", "row unlocked by the game")
+end)
+
+test("picks the build from points spent per tree on the modern API", function()
+    login({ level = 16, traitPoints = 1, traitNodes = traitNodes(), specSpent = { 0, 0, 4 } })
+    eq(talentLine(), "Talents  Shield Specialization 1/5", "Protection")
+    local probe = (wow.slash("probe") and table.concat(_G.WarriorPilotLiteDB.probe, "\n"))
+    has(probe, "advisor: 6 talents, unspent 1, spent 0/0/4, build prot", "probe summary")
+    has(probe, "Improved Rend 0/3 open", "probe talents")
+end)
+
 test("keeps the guide working when the talent API errors, and /wpl probe records it", function()
     level12({ talentPoints = 2, talentTabs = talentTabs() })
     _G.GetTalentInfo = function() error("Usage: GetTalentInfo(query)") end

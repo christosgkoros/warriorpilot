@@ -46,6 +46,11 @@ local function defaultState()
         -- Talent tabs: list of { talents = list of { name, tier, column, rank, maxRank,
         -- prereq = { tier, column } } }.
         talentTabs = {},
+        -- Forever's modern talents (C_Traits), or nil for the classic API above:
+        -- list of { name, rank, maxRank, open }; `open` = the game lets you take a rank.
+        traitNodes = nil,
+        traitPoints = 0,      -- unspent, from the tree currency
+        specSpent = nil,      -- { arms, fury, protection } points spent
         equipped = {},        -- [inventory slot] = itemID
         equipLocs = {},       -- [itemID] = "INVTYPE_SHIELD", ...
         trainer = nil,        -- TrainerSpellsBuiltin, as the TrainerSpells addon defines it
@@ -151,7 +156,10 @@ local function installGlobals(db)
         if d then return d[1], d[2] end
     end
 
-    _G.C_Spell = { GetSpellName = function(id) return SPELL_NAMES[id] end }
+    _G.C_Spell = { GetSpellName = function(id)
+        local node = s.traitNodes and s.traitNodes[id - 90000]
+        return node and node.name or SPELL_NAMES[id]
+    end }
     _G.C_UnitAuras = {
         GetAuraDataByIndex = function(_, index) return s.auras[index] end,
     }
@@ -186,6 +194,35 @@ local function installGlobals(db)
         GetItemInfoInstant = function(id) return id, "Armor", "Misc", s.equipLocs[id] end,
     }
     _G.GetInventoryItemID = function(_, slot) return s.equipped[slot] end
+    -- Talents: node i has spell 90000+i, whose name is the talent's.
+    _G.C_ClassTalents, _G.C_Traits, _G.C_SpecializationInfo = nil, nil, nil
+    if s.traitNodes then
+        _G.C_ClassTalents = { GetActiveConfigID = function() return 77 end }
+        _G.C_Traits = {
+            GetConfigInfo = function(id) return { ID = id, name = "Warrior", treeIDs = { 5 } } end,
+            GetTreeCurrencyInfo = function() return { { traitCurrencyID = 1, quantity = s.traitPoints, spent = 0 } } end,
+            GetTreeNodes = function()
+                local ids = {}
+                for i in ipairs(s.traitNodes) do ids[i] = 1000 + i end
+                return ids
+            end,
+            GetNodeInfo = function(_, nodeID)
+                local n = s.traitNodes[nodeID - 1000]
+                return { ID = nodeID, currentRank = n.rank or 0, maxRanks = n.maxRank, isVisible = true,
+                    canPurchaseRank = n.open == true and s.traitPoints > 0, isAvailable = n.open == true,
+                    meetsEdgeRequirements = true, entryIDs = { nodeID - 1000 } }
+            end,
+            GetEntryInfo = function(_, entryID) return { definitionID = entryID, maxRanks = 1 } end,
+            GetDefinitionInfo = function(definitionID) return { spellID = 90000 + definitionID } end,
+        }
+        _G.C_SpecializationInfo = {
+            GetSpecializationInfo = function(spec)
+                assert(type(spec) == "number", "bad argument #1")
+                local spent = s.specSpent and s.specSpent[spec] or 0
+                return spec, "Spec" .. spec, "", "icon", "DAMAGER", 1, spent
+            end,
+        }
+    end
     _G.GetNumTalentTabs = function() return #s.talentTabs end
     _G.GetNumTalents = function(tab) return #s.talentTabs[tab].talents end
     _G.GetTalentInfo = function(tab, index)
