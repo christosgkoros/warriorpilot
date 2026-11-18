@@ -868,6 +868,21 @@ test("picks the build from your spent points, your weapons, or /wpl build", func
     eq(talentLine(), "Talents  Improved Rend 3/3", "back to auto")
 end)
 
+test("keeps the guide working when the talent API errors, and /wpl probe records it", function()
+    level12({ talentPoints = 2, talentTabs = talentTabs() })
+    _G.GetTalentInfo = function() error("Usage: GetTalentInfo(query)") end
+    wow.fire("CHARACTER_POINTS_CHANGED")
+    wow.advance(1)
+    eq(talentLine(), "Talents  Spend 2 points", "falls back to the point count")
+    has(stepsText(), "Zone  Loch Modan", "rest of the guide")
+    has(wow.slash("talents"), "Next steps at level 12:", "/wpl talents still prints")
+    has(wow.slash("probe"), "Talent probe saved", "probe")
+    local probe = table.concat(_G.WarriorPilotLiteDB.probe, "\n")
+    has(probe, "GetTalentInfo(1,1): ERROR", "records the error")
+    has(probe, "GetNumTalents(1): 8", "records results")
+    has(probe, "C_SpecializationInfo: missing", "records missing APIs")
+end)
+
 test("works without TrainerSpells and skips the Alliance route for the Horde", function()
     login({ level = 12 })
     hasNot(stepsText(), "Train", "no trainer data")

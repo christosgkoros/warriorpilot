@@ -1,10 +1,10 @@
--- WarriorPilot Lite 1.7.0 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.7.1 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- The one thing it changes is minimap tracking, kept on out of combat (/wpl track).
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.7.0"
+local VERSION = "1.7.1"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -1020,7 +1020,7 @@ end
 local function TalentKey(name) return (name:lower():gsub(" weapon ", " ")) end
 
 -- Your talent tree as the game reports it, with points spent per tab.
-local function TalentTree()
+local function ReadTalentTree()
     if not (GetNumTalentTabs and GetNumTalents and GetTalentInfo) then return nil end
     local tree = { byName = {}, spent = {}, total = 0, all = {} }
     local byPos = {}
@@ -1050,6 +1050,115 @@ local function TalentTree()
         end
     end
     return tree
+end
+
+-- Forever runs on the modern client, whose talent API may not match the classic
+-- one; an error here must never stop the rest of the guide.
+local talentError
+local function TalentTree()
+    local ok, tree = pcall(ReadTalentTree)
+    if ok then return tree end
+    talentError = tostring(tree)
+    return nil
+end
+
+local function CharacterPoints()
+    for _, fn in ipairs({ UnitCharacterPoints or false, GetUnspentTalentPoints or false }) do
+        if fn then
+            local ok, points = pcall(fn, "player")
+            if ok and Number(points) then return points end
+        end
+    end
+    return nil
+end
+
+-- /wpl probe: record how this client reports talents, so the advisor can be
+-- adapted to it. Saved in WarriorPilotLiteDB.probe on the next /reload.
+local function Describe(...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        local value = select(i, ...)
+        if Secret(value) then parts[i] = "<secret>"
+        elseif type(value) == "table" then
+            local fields = {}
+            for k, v in pairs(value) do
+                fields[#fields+1] = tostring(k) .. "=" .. (Secret(v) and "<secret>" or tostring(v))
+                if #fields >= 40 then break end
+            end
+            table.sort(fields)
+            parts[i] = "{" .. table.concat(fields, ", ") .. "}"
+        else parts[i] = tostring(value) end
+    end
+    return table.concat(parts, " | ")
+end
+
+local function Pack(...) return { n = select("#", ...), ... } end
+
+local function Probe()
+    local out = {}
+    local function Try(label, fn, ...)
+        if type(fn) ~= "function" then out[#out+1] = label .. ": missing"; return end
+        local results = Pack(pcall(fn, ...))
+        if results[1] then
+            out[#out+1] = label .. ": " .. Describe(unpack(results, 2, results.n))
+        else
+            out[#out+1] = label .. ": ERROR " .. tostring(results[2])
+        end
+        return unpack(results, 2, results.n)
+    end
+    local function Keys(label, tbl)
+        if type(tbl) ~= "table" then out[#out+1] = label .. ": missing"; return end
+        local keys = {}
+        for k in pairs(tbl) do keys[#keys+1] = tostring(k) end
+        table.sort(keys)
+        out[#out+1] = label .. " keys: " .. table.concat(keys, ", ")
+    end
+    out[#out+1] = "version " .. VERSION .. ", level " .. tostring(UnitLevel("player"))
+    if GetBuildInfo then Try("GetBuildInfo", GetBuildInfo) end
+    out[#out+1] = "last talent error: " .. tostring(talentError)
+    Try("UnitCharacterPoints", UnitCharacterPoints, "player")
+    Try("GetUnspentTalentPoints", GetUnspentTalentPoints)
+    out[#out+1] = "PLAYER_TALENTS_PER_TIER: " .. tostring(PLAYER_TALENTS_PER_TIER)
+    local tabs = Try("GetNumTalentTabs", GetNumTalentTabs)
+    Try("GetTalentTabInfo(1)", GetTalentTabInfo, 1)
+    Try("GetTalentTabInfo{1}", GetTalentTabInfo, { specializationIndex = 1 })
+    for tab = 1, math.min(Number(tabs) or 0, 3) do
+        local count = Try("GetNumTalents(" .. tab .. ")", GetNumTalents, tab)
+        for index = 1, math.min(Number(count) or 0, 30) do
+            Try(string.format("GetTalentInfo(%d,%d)", tab, index), GetTalentInfo, tab, index)
+        end
+        Try("GetTalentPrereqs(" .. tab .. ",2)", GetTalentPrereqs, tab, 2)
+    end
+    Try("GetTalentInfo{tab1,1}", GetTalentInfo, { specializationIndex = 1, talentIndex = 1 })
+    Keys("C_SpecializationInfo", C_SpecializationInfo)
+    if C_SpecializationInfo then
+        Try("C_SpecializationInfo.GetNumSpecializations", C_SpecializationInfo.GetNumSpecializations)
+        Try("C_SpecializationInfo.GetSpecialization", C_SpecializationInfo.GetSpecialization)
+        for i = 1, 3 do
+            Try("C_SpecializationInfo.GetSpecializationInfo{" .. i .. "}", C_SpecializationInfo.GetSpecializationInfo,
+                { specializationIndex = i })
+        end
+        Try("C_SpecializationInfo.GetTalentInfo{1,1}", C_SpecializationInfo.GetTalentInfo,
+            { tier = 1, column = 1, specializationIndex = 1 })
+    end
+    Keys("C_ClassTalents", C_ClassTalents)
+    local configID = C_ClassTalents and Try("C_ClassTalents.GetActiveConfigID", C_ClassTalents.GetActiveConfigID)
+    if C_Traits and Number(configID) then
+        local config = Try("C_Traits.GetConfigInfo", C_Traits.GetConfigInfo, configID)
+        local treeID = type(config) == "table" and config.treeIDs and config.treeIDs[1]
+        local nodes = treeID and Try("C_Traits.GetTreeNodes", C_Traits.GetTreeNodes, treeID)
+        for i = 1, math.min(type(nodes) == "table" and #nodes or 0, 3) do
+            local node = Try("C_Traits.GetNodeInfo #" .. i, C_Traits.GetNodeInfo, configID, nodes[i])
+            local entryID = type(node) == "table" and node.entryIDs and node.entryIDs[1]
+            local entry = entryID and Try("C_Traits.GetEntryInfo", C_Traits.GetEntryInfo, configID, entryID)
+            if type(entry) == "table" and entry.definitionID then
+                Try("C_Traits.GetDefinitionInfo", C_Traits.GetDefinitionInfo, entry.definitionID)
+            end
+        end
+    end
+    saved.probe = out
+    Print(string.format("Talent probe saved (%d lines). Type /reload so it's written to disk.", #out))
+    for i = 1, math.min(#out, 8) do Print("  " .. out[i]) end
 end
 
 local function EquipLoc(slot)
@@ -1127,7 +1236,7 @@ local function BuildGuide()
     local guide = { level = level, ready = {}, todo = {}, pickup = {}, dungeons = {}, focus = {} }
 
     local tree = TalentTree()
-    local points = UnitCharacterPoints and Number((UnitCharacterPoints("player")))
+    local points = CharacterPoints()
     if not points and tree then points = math.max(0, level - 9 - tree.total) end
     if points and points > 0 then guide.talents = points end
     if tree and #tree.all > 0 then
@@ -1525,6 +1634,8 @@ local function Cmd(text)
         saved.x, saved.y = 0, 0
         panel:ClearAllPoints(); panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         panel:Show(); saved.visible = true
+    elseif command == "probe" then
+        Probe()
     elseif command == "guide" or command == "talents" then
         ShowGuide()
     elseif command:match("^build") then
