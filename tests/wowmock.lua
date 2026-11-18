@@ -43,6 +43,11 @@ local function defaultState()
         completedQuests = {}, -- [questID] = true once turned in
         items = {},           -- [itemID] = count in your bags
         talentPoints = 0,
+        -- Talent tabs: list of { talents = list of { name, tier, column, rank, maxRank,
+        -- prereq = { tier, column } } }.
+        talentTabs = {},
+        equipped = {},        -- [inventory slot] = itemID
+        equipLocs = {},       -- [itemID] = "INVTYPE_SHIELD", ...
         trainer = nil,        -- TrainerSpellsBuiltin, as the TrainerSpells addon defines it
     }
 end
@@ -176,7 +181,21 @@ local function installGlobals(db)
     }
     _G.UnitFactionGroup = function() return s.faction end
     _G.UnitCharacterPoints = function() return s.talentPoints end
-    _G.C_Item = { GetItemCount = function(id) return s.items[id] or 0 end }
+    _G.C_Item = {
+        GetItemCount = function(id) return s.items[id] or 0 end,
+        GetItemInfoInstant = function(id) return id, "Armor", "Misc", s.equipLocs[id] end,
+    }
+    _G.GetInventoryItemID = function(_, slot) return s.equipped[slot] end
+    _G.GetNumTalentTabs = function() return #s.talentTabs end
+    _G.GetNumTalents = function(tab) return #s.talentTabs[tab].talents end
+    _G.GetTalentInfo = function(tab, index)
+        local t = s.talentTabs[tab].talents[index]
+        return t.name, "icon", t.tier, t.column, t.rank or 0, t.maxRank
+    end
+    _G.GetTalentPrereqs = function(tab, index)
+        local prereq = s.talentTabs[tab].talents[index].prereq
+        if prereq then return prereq[1], prereq[2], true end
+    end
     _G.C_QuestLog = {
         GetNumQuestLogEntries = function() return #s.quests end,
         GetInfo = function(index)

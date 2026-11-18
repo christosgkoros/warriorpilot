@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: |cffffc46bWarriorPilot Lite|r
-## Notes: Lightweight Warrior leveling HUD for WoW Forever: Rage, XP/hour, time to level, quest vs kill XP, between-pulls readiness, in-combat flee warning, keeps Find Minerals/Find Treasure on, next-steps guide, mining casts and ore loot.
+## Notes: Lightweight Warrior leveling HUD for WoW Forever: Rage, XP/hour, time to level, quest vs kill XP, between-pulls readiness, in-combat flee warning, keeps Find Minerals/Find Treasure on, next-steps guide with leveling talent picks, mining casts and ore loot.
 ## Author: Custom build for Christos
-## Version: 1.6.0
+## Version: 1.7.0
 ## SavedVariablesPerCharacter: WarriorPilotLiteDB
 ## OptionalDeps: TrainerSpells
 ## X-GameType: Forever

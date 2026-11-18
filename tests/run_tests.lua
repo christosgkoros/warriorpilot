@@ -796,6 +796,78 @@ test("reminds about unspent talent points first and keeps four lines", function(
     has(lines[4], "Zone  Loch Modan", "zone always last")
 end)
 
+-- A cut-down Forever tree: Arms, Fury, Protection.
+local function talentTabs(spent)
+    spent = spent or {}
+    local function t(name, tier, column, maxRank, prereq)
+        return { name = name, tier = tier, column = column, maxRank = maxRank, rank = spent[name], prereq = prereq }
+    end
+    return {
+        { talents = {
+            t("Improved Rend", 1, 1, 3), t("Deflection", 1, 2, 5),
+            t("Improved Tactical Mastery", 2, 1, 3), t("Anger Management", 2, 2, 1),
+            t("Deep Wounds", 3, 1, 3), t("Two-Handed Specialization", 3, 2, 5),
+            t("Bloodthrill", 4, 1, 2, { 3, 1 }), t("Spearing Strike", 4, 2, 1),
+        } },
+        { talents = { t("Cruelty", 1, 1, 5), t("Booming Voice", 1, 2, 5) } },
+        { talents = { t("Shield Specialization", 1, 1, 5), t("Iron Will", 1, 2, 5) } },
+    }
+end
+local function talentLine()
+    for _, line in ipairs(steps()) do if line:find("^Talents") then return line end end
+end
+
+test("names the next leveling talent for your unspent points", function()
+    level12({ talentPoints = 1, talentTabs = talentTabs() })
+    eq(talentLine(), "Talents  Improved Rend 1/3", "one point")
+    login({ level = 14, talentPoints = 5, talentTabs = talentTabs() })
+    eq(talentLine(), "Talents  Improved Rend 3/3, Deflection 2/5", "Deflection capped until tier 2")
+    login({ level = 16, talentPoints = 7, talentTabs = talentTabs() })
+    eq(talentLine(), "Talents  Improved Rend 3/3, Deflection 2/5, Improved Tactical Mastery 2/3", "tier 2 opens")
+end)
+
+test("plans the next points through tiers and prerequisites", function()
+    login({ level = 20, talentPoints = 1,
+        talentTabs = talentTabs({ ["Improved Rend"] = 3, ["Deflection"] = 3, ["Improved Tactical Mastery"] = 3,
+            ["Anger Management"] = 1 }) })
+    eq(talentLine(), "Talents  Deep Wounds 1/3", "tier 3")
+    local out = wow.slash("talents")
+    has(out, "Talents: Deep Wounds 1/3", "now")
+    has(out, "Next talents (Arms): Deep Wounds 3/3, Two-Handed Specialization 3/5", "Bloodthrill waits for Deep Wounds 3/3 and tier 4")
+end)
+
+test("leaves points past the plan to you", function()
+    login({ level = 20, talentPoints = 2, talentTabs = {
+        { talents = { { name = "Improved Rend", tier = 1, column = 1, maxRank = 1 } } } } })
+    eq(talentLine(), "Talents  Improved Rend 1/1, +1 your pick", "rest is yours")
+end)
+
+test("announces the talent pick when you level up", function()
+    login({ level = 10, talentTabs = talentTabs() })
+    wow.chat = {}
+    wow.state.talentPoints = 1
+    levelUp(11, 0, 1200)
+    wow.fire("PLAYER_LEVEL_UP", 11)
+    wow.advance(1)
+    eq(wow.alerts[#wow.alerts], "Talent point: Improved Rend 1/3", "center screen")
+    has(table.concat(wow.chat, "\n"), "Talent point: Improved Rend 1/3 (Arms leveling build", "chat")
+end)
+
+test("picks the build from your spent points, your weapons, or /wpl build", function()
+    login({ level = 12, talentPoints = 1, talentTabs = talentTabs(), equipped = { [17] = 2129 },
+        equipLocs = { [2129] = "INVTYPE_SHIELD" } })
+    eq(talentLine(), "Talents  Shield Specialization 1/5", "shield: Protection")
+    login({ level = 12, talentPoints = 1, talentTabs = talentTabs({ ["Improved Rend"] = 2 }),
+        equipped = { [17] = 2129 }, equipLocs = { [2129] = "INVTYPE_SHIELD" } })
+    eq(talentLine(), "Talents  Improved Rend 3/3", "spent points win over the shield")
+    wow.slash("build fury")
+    wow.advance(1)
+    eq(talentLine(), "Talents  Cruelty 1/5", "chosen build")
+    wow.slash("build auto")
+    wow.advance(1)
+    eq(talentLine(), "Talents  Improved Rend 3/3", "back to auto")
+end)
+
 test("works without TrainerSpells and skips the Alliance route for the Horde", function()
     login({ level = 12 })
     hasNot(stepsText(), "Train", "no trainer data")

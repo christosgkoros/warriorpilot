@@ -1,10 +1,10 @@
--- WarriorPilot Lite 1.6.0 for World of Warcraft: Forever (Interface 16001)
+-- WarriorPilot Lite 1.7.0 for World of Warcraft: Forever (Interface 16001)
 -- Free, readable addon. Never casts, targets, moves or performs protected actions.
 -- The one thing it changes is minimap tracking, kept on out of combat (/wpl track).
 -- Important for modern WoW: player Rage can be a "secret value" during combat.
 -- We pass Rage directly to the native StatusBar and never inspect/compare it.
 
-local VERSION = "1.6.0"
+local VERSION = "1.7.0"
 local MAX_HISTORY = 100
 -- Default HUD spot: left of the character so it doesn't block clicks on mobs/nodes.
 local DEFAULT_X, DEFAULT_Y = -420, 120
@@ -689,12 +689,16 @@ local function HealthRace(enemies)
     return 0, string.format("Winning: you %s, enemies %s", Seconds(myTime), Seconds(theirTime))
 end
 
-local function FightAlert(text, color)
+local function Notice(text, color)
     if RaidNotice_AddMessage and RaidWarningFrame then
         RaidNotice_AddMessage(RaidWarningFrame, text, { r = color[1], g = color[2], b = color[3] })
     elseif UIErrorsFrame then
         UIErrorsFrame:AddMessage(text, color[1], color[2], color[3])
     end
+end
+
+local function FightAlert(text, color)
+    Notice(text, color)
     if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
 end
 
@@ -907,6 +911,33 @@ local GUIDE_FOCUS = {
     { 1, 60, "Rest at a campfire between sessions, and eat crafted food for its XP bonus." },
     { 1, 60, "Keep Cooking and First Aid up: food buffs, campfires and bandages save downtime." },
 }
+-- Talent priorities for the leveling builds in WoW Forever guides (Method, Warcraft
+-- Tavern, Zockify; Nov 2026). Forever reworked the trees and the guides give
+-- priorities rather than a point-per-level order, so the addon reads the real tree
+-- and suggests the first talent here the game lets you take. A number caps that
+-- talent early so the next one comes first; it's finished later in the list.
+-- Names that don't exist on your client are skipped.
+local TALENT_BUILDS = {
+    arms = { label = "Arms", tab = 1, picks = {
+        { "Improved Rend" }, { "Deflection", 2 }, { "Improved Tactical Mastery" }, { "Anger Management" },
+        { "Deep Wounds" }, { "Two-Handed Weapon Specialization" }, { "Bloodthrill" }, { "Sweeping Strikes" },
+        { "Weaponmaster" }, { "Mortal Strike" }, { "Impale" }, { "Improved Overpower" }, { "Improved Slam" },
+        { "Deflection" }, { "Unbridled Wrath" }, { "Cruelty" }, { "Enrage" },
+    } },
+    prot = { label = "Protection", tab = 3, picks = {
+        { "Shield Specialization" }, { "Improved Thunder Clap" }, { "Improved Bloodrage" },
+        { "Master of Defense" }, { "Improved Revenge" }, { "Vanguard" }, { "Focused Rage" }, { "Bastion" },
+        { "Booming Voice" }, { "Improved Sunder Armor" }, { "Iron Will" },
+        { "Cruelty" }, { "Enrage" }, { "Blood Craze" },
+    } },
+    fury = { label = "Fury", tab = 2, picks = {
+        { "Cruelty" }, { "Furious Precision" }, { "Dual Wield Specialization" }, { "Piercing Howl" },
+        { "Unbridled Wrath" }, { "Enrage" }, { "Blood Craze" }, { "Death Wish" }, { "Gore Drinker" },
+        { "Raging Blows" }, { "Whirlwind" }, { "Improved Whirlwind" }, { "Bloodthirst" }, { "Flurry" },
+        { "Lingering Rage" },
+    } },
+}
+local TALENT_LOOKAHEAD = 5
 local guideDirty = true
 local lastGuide = 0
 
@@ -985,6 +1016,108 @@ local function TrainerSkills(level)
     return { now = now, cost = cost, nextLevel = nextLevel, upcoming = upcoming }
 end
 
+-- Guides disagree on "Two-Handed (Weapon) Specialization"; match either.
+local function TalentKey(name) return (name:lower():gsub(" weapon ", " ")) end
+
+-- Your talent tree as the game reports it, with points spent per tab.
+local function TalentTree()
+    if not (GetNumTalentTabs and GetNumTalents and GetTalentInfo) then return nil end
+    local tree = { byName = {}, spent = {}, total = 0, all = {} }
+    local byPos = {}
+    for tab = 1, Number(GetNumTalentTabs()) or 0 do
+        tree.spent[tab] = 0
+        for index = 1, Number(GetNumTalents(tab)) or 0 do
+            local name, _, tier, column, rank, maxRank = GetTalentInfo(tab, index)
+            if type(name) == "string" and not Secret(name) then
+                local talent = { tab = tab, index = index, name = name, tier = Number(tier) or 1,
+                    rank = Number(rank) or 0, maxRank = Number(maxRank) or 1, prereqs = {} }
+                tree.byName[TalentKey(name)] = talent
+                tree.all[#tree.all+1] = talent
+                byPos[tab .. ":" .. talent.tier .. ":" .. tostring(Number(column))] = talent
+                tree.spent[tab] = tree.spent[tab] + talent.rank
+                tree.total = tree.total + talent.rank
+            end
+        end
+    end
+    -- A prerequisite has to be maxed before the talent under it opens up.
+    if GetTalentPrereqs then
+        for _, talent in ipairs(tree.all) do
+            local prereqs = { GetTalentPrereqs(talent.tab, talent.index) }
+            for i = 1, #prereqs, 3 do
+                local prereq = byPos[talent.tab .. ":" .. tostring(Number(prereqs[i])) .. ":" .. tostring(Number(prereqs[i+1]))]
+                if prereq then talent.prereqs[#talent.prereqs+1] = prereq end
+            end
+        end
+    end
+    return tree
+end
+
+local function EquipLoc(slot)
+    local itemID = GetInventoryItemID and Number(GetInventoryItemID("player", slot))
+    local info = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+    if not itemID or not info then return nil end
+    local _, _, _, equipLoc = info(itemID)
+    return type(equipLoc) == "string" and equipLoc or nil
+end
+
+-- /wpl build picks one; otherwise follow the tree you've spent the most in, and
+-- before your first point, the weapons you wield: shield, two weapons, or a two-hander.
+local function TalentBuild(tree)
+    local chosen = saved and saved.talentBuild
+    if TALENT_BUILDS[chosen] then return chosen end
+    local best, most = nil, 0
+    for key, build in pairs(TALENT_BUILDS) do
+        local spent = tree.spent[build.tab] or 0
+        if spent > most then best, most = key, spent end
+    end
+    if best then return best end
+    local offHand = EquipLoc(17)
+    if offHand == "INVTYPE_SHIELD" then return "prot" end
+    if offHand and offHand:find("WEAPON") then return "fury" end
+    return "arms"
+end
+
+-- The next `count` talent points of the build, one entry per point, picked in
+-- order as if you spent them: each opens up tiers and talents for the next.
+local function TalentPicks(tree, buildKey, count)
+    local perTier = Number(PLAYER_TALENTS_PER_TIER) or 5
+    local ranks, spent, picks = {}, {}, {}
+    for tab, points in pairs(tree.spent) do spent[tab] = points end
+    local function Rank(talent) return ranks[talent] or talent.rank end
+    local function Open(talent, cap)
+        if Rank(talent) >= math.min(cap or talent.maxRank, talent.maxRank) then return false end
+        if (spent[talent.tab] or 0) < (talent.tier - 1) * perTier then return false end
+        for _, prereq in ipairs(talent.prereqs) do
+            if Rank(prereq) < prereq.maxRank then return false end
+        end
+        return true
+    end
+    for _ = 1, count do
+        local chosen
+        for _, pick in ipairs(TALENT_BUILDS[buildKey].picks) do
+            local talent = tree.byName[TalentKey(pick[1])]
+            if talent and Open(talent, pick[2]) then chosen = talent; break end
+        end
+        if not chosen then break end
+        ranks[chosen] = Rank(chosen) + 1
+        spent[chosen.tab] = (spent[chosen.tab] or 0) + 1
+        picks[#picks+1] = { talent = chosen, rank = ranks[chosen] }
+    end
+    return picks
+end
+
+-- "Improved Rend 2/3, Deflection 1/5": one entry per talent, at the rank it ends on.
+local function FormatPicks(picks, from, to)
+    local parts, last = {}, nil
+    for i = from, math.min(to, #picks) do
+        local pick = picks[i]
+        local text = string.format("%s %d/%d", pick.talent.name, pick.rank, pick.talent.maxRank)
+        if last == pick.talent then parts[#parts] = text else parts[#parts+1] = text end
+        last = pick.talent
+    end
+    return table.concat(parts, ", ")
+end
+
 local function InBand(level, entry) return level >= entry[1] and level <= entry[2] end
 
 -- Everything the guide knows for your current state, highest priority first.
@@ -993,8 +1126,14 @@ local function BuildGuide()
     local alliance = not UnitFactionGroup or UnitFactionGroup("player") == "Alliance"
     local guide = { level = level, ready = {}, todo = {}, pickup = {}, dungeons = {}, focus = {} }
 
+    local tree = TalentTree()
     local points = UnitCharacterPoints and Number((UnitCharacterPoints("player")))
+    if not points and tree then points = math.max(0, level - 9 - tree.total) end
     if points and points > 0 then guide.talents = points end
+    if tree and #tree.all > 0 then
+        guide.build = TALENT_BUILDS[TalentBuild(tree)].label
+        guide.picks = TalentPicks(tree, TalentBuild(tree), (guide.talents or 0) + TALENT_LOOKAHEAD)
+    end
     guide.skills = TrainerSkills(level)
 
     local log = QuestLog()
@@ -1034,10 +1173,29 @@ local function BuildGuide()
     return guide
 end
 
+-- What to spend your unspent points on now.
+local function TalentNow(guide)
+    local points = guide.talents
+    local text = guide.picks and FormatPicks(guide.picks, 1, points) or ""
+    if text == "" then return string.format("Spend %d point%s", points, points > 1 and "s" or "") end
+    local planned = math.min(points, #guide.picks)
+    if planned < points then text = text .. string.format(", +%d your pick", points - planned) end
+    return text
+end
+
+-- Chat (and on level-up, center screen) when there are points to spend.
+local function AnnounceTalents(onScreen)
+    local guide = BuildGuide()
+    if not guide.talents then return end
+    local text = "Talent point" .. (guide.talents > 1 and "s" or "") .. ": " .. TalentNow(guide)
+    if onScreen then Notice(text, { 1, 0.77, 0.42 }) end
+    Print(text .. (guide.build and (" (" .. guide.build .. " leveling build, /wpl talents)") or ""))
+end
+
 local function GuideLines(guide)
     local lines = {}
     local function add(tag, text) if text then lines[#lines+1] = Colored(tag, text) end end
-    if guide.talents then add("Talents", string.format("Spend %d point%s", guide.talents, guide.talents > 1 and "s" or "")) end
+    if guide.talents then add("Talents", TalentNow(guide)) end
     add("Turn in", guide.ready[1])
     if not guide.ready[1] and #guide.finished > 0 then
         add("Turn in", string.format("%d done: %s", #guide.finished, table.concat(guide.finished, ", ")))
@@ -1067,7 +1225,11 @@ local function ShowGuide()
     local guide = BuildGuide()
     local skills = guide.skills
     Print(string.format("Next steps at level %d:", guide.level))
-    if guide.talents then Print(string.format("  Talents: %d unspent.", guide.talents)) end
+    if guide.talents then Print("  Talents: " .. TalentNow(guide)) end
+    if guide.picks and #guide.picks > (guide.talents or 0) then
+        Print(string.format("  Next talents (%s): %s", guide.build,
+            FormatPicks(guide.picks, (guide.talents or 0) + 1, #guide.picks)))
+    end
     if skills then
         if #skills.now > 0 then
             Print("  Train now: " .. table.concat(skills.now, ", ") .. " (" .. FormatMoney(skills.cost) .. ")")
@@ -1363,8 +1525,21 @@ local function Cmd(text)
         saved.x, saved.y = 0, 0
         panel:ClearAllPoints(); panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
         panel:Show(); saved.visible = true
-    elseif command == "guide" then
+    elseif command == "guide" or command == "talents" then
         ShowGuide()
+    elseif command:match("^build") then
+        local choice = command:match("^build%s+(%a+)$")
+        if choice == "protection" then choice = "prot" end
+        if choice == "auto" then
+            saved.talentBuild = nil
+            Print("Talent build: auto (the tree you've spent most in, or your weapons).")
+        elseif TALENT_BUILDS[choice] then
+            saved.talentBuild = choice
+            Print("Talent build: " .. TALENT_BUILDS[choice].label .. ".")
+        else
+            Print("/wpl build arms | fury | prot | auto")
+        end
+        guideDirty = true; WPL.Refresh()
     elseif command == "track" then
         saved.keepTracking = saved.keepTracking == false
         trackingGaveUp, trackingTries = {}, {}
@@ -1374,7 +1549,7 @@ local function Cmd(text)
         saved.debug = not saved.debug
         Print(saved.debug and "Mining debug ON (prints spell IDs)." or "Mining debug OFF.")
     elseif command == "help" then
-        Print("/wpl [toggle | show | hide | stats | history | levels | export | reset | tip | lock | center | guide | track | debug | help]")
+        Print("/wpl [toggle | show | hide | stats | history | levels | export | reset | tip | lock | center | guide | talents | build | track | debug | help]")
         Print("Ore is counted from YOUR loot messages. Mining casts are attempts, not unique veins.")
     else
         Print("Unknown command. Type /wpl help.")
@@ -1428,6 +1603,7 @@ events:SetScript("OnEvent", function(self, event, ...)
         end
         WPL.Refresh()
         Print("Loaded. /wpl help for commands. Drag to reposition.")
+        AnnounceTalents(false)
         return
     end
 
@@ -1451,7 +1627,7 @@ events:SetScript("OnEvent", function(self, event, ...)
         -- The XP snapshot may still be from the previous level here. Sample a moment
         -- later so the gain shows without waiting for the next kill; SampleXP
         -- ignores stale values, so this can't double-count.
-        C_Timer.After(1, function() SampleXP(); guideDirty = true; WPL.Refresh() end)
+        C_Timer.After(1, function() SampleXP(); guideDirty = true; WPL.Refresh(); AnnounceTalents(true) end)
         if labels.tip then labels.tip:SetText(AddonTip()) end
     elseif event == "PLAYER_DEAD" then
         session.deaths = session.deaths + 1
